@@ -58,6 +58,13 @@
   .grid3{display:grid;grid-template-columns:28px repeat(3,1fr);gap:4px;align-items:center}
   .grid3 input{width:100%}
   .empty{background:var(--panel);padding:10px;border-radius:4px;font-size:13px;color:var(--muted)}
+  .nom{display:grid;grid-template-columns:auto repeat(3,1fr);gap:4px;align-items:center;margin-top:6px}
+  .nom input{width:100%}
+  .nom span{font-size:12.5px;color:var(--muted)}
+  .glob{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  .pname{font:500 12.5px var(--sans);border:1px solid transparent;padding:2px 4px;width:140px}
+  .pname:hover,.pname:focus{border-color:var(--line)}
+  pre.raw{font:11px var(--mono);background:var(--panel);padding:8px;overflow:auto;max-height:200px}
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -133,7 +140,29 @@
       <button id="btnRefresh">Vernieuwen</button>
       <button id="btnCsv">CSV exporteren</button>
     </div>
+    <div class="row">
+      <button id="btnMeasLabels">Lokale maten in viewer tonen</button>
+      <button id="btnMeasLabelsOff">Verbergen</button>
+    </div>
     <div id="measList"></div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>Coördinaatcontrole</h2>
+    <p class="muted">Plaats punten met de puntmeting van Trimble Connect. Elk punt verschijnt hieronder in lokale coördinaten. Vul de theoretische waarden uit de werkhuistekening in om de afwijking per as te zien.</p>
+    <div class="row">
+      <button id="btnPtRefresh">Vernieuwen</button>
+      <button id="btnPtCsv">CSV exporteren</button>
+    </div>
+    <div class="row">
+      <button id="btnPtLabels">Lokale coördinaten in viewer tonen</button>
+      <button id="btnPtLabelsOff">Verbergen</button>
+    </div>
+    <div id="ptList"></div>
+    <details>
+      <summary>Technische info (bij problemen)</summary>
+      <pre class="raw" id="rawInfo">Nog geen gegevens.</pre>
+    </details>
   </section>
 </main>
 
@@ -147,8 +176,14 @@ const S = {
   axis: null,          // {O,x,y,z,base,offset,mode,name,created,sourceIds}
   meas: [],            // metingen uit de viewer
   checks: {},          // per meting-id: {comp, measured}
-  drawnIds: []         // markup-id's die deze extensie tekende
+  drawnIds: [],        // markup-id's van de getekende assen
+  points: [],          // {key, src, id, g:[x,y,z]}
+  pchecks: {},         // per punt-key: {name, nx, ny, nz}
+  measLabelIds: [],    // tekstlabels bij metingen
+  ptLabelIds: []       // tekstlabels bij punten
 };
+const ZERO_LEN = 0.01; // meting korter dan dit (mm) = puntmeting
+const LABEL_OFFSET = 250; // afstand label tot punt (mm)
 const SNAP_ERR = 0.5;  // aangenomen snapfout per punt (mm) voor de indicatie
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 1) => Number(v).toLocaleString("nl-BE", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -156,6 +191,10 @@ const fmtV = (v) => v.map((c) => fmt(c, 4)).join("  ");
 const fmtP = (v) => v.map((c) => fmt(c, 1)).join("  ");
 const pickToVec = (p) => [p.positionX, p.positionY, p.positionZ];
 const vecToPick = (v) => ({ positionX: v[0], positionY: v[1], positionZ: v[2] });
+function markupPoint(m) {
+  const p = m.start || m.position || m.point || m;
+  return p && Number.isFinite(p.positionX) ? [p.positionX, p.positionY, p.positionZ] : null;
+}
 const mode = () => document.querySelector("input[name=mode]:checked").value;
 
 function status(msg, kind) { const el = $("status"); el.textContent = msg; el.className = kind || ""; }
@@ -174,6 +213,7 @@ async function init() {
   updateInstructions();
   populateSelects();
   renderMeasurements();
+  renderPoints();
   if (window.parent === window) {
     status("Niet geladen in Trimble Connect. Alleen handmatige invoer werkt.", "warn");
     return;
@@ -191,8 +231,20 @@ async function refreshMeasurements() {
   if (!S.api) return;
   try {
     const list = await S.api.markup.getMeasurementMarkups();
-    S.meas = (list || []).filter((m) => m && m.start && m.end)
-      .sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    let singles = [];
+    try { singles = (await S.api.markup.getSinglePointMarkups()) || []; } catch (e) { /* niet beschikbaar */ }
+    const all = (list || []).filter((m) => m && m.start && m.end).sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    const isPoint = (m) => LCS.len(LCS.sub(pickToVec(m.end), pickToVec(m.start))) < ZERO_LEN;
+    S.meas = all.filter((m) => !isPoint(m));
+    S.points = [
+      ...all.filter(isPoint).map((m) => ({ key: "M" + m.id, src: "meting", id: m.id, g: pickToVec(m.start) })),
+      ...singles.map((m) => ({ key: "P" + m.id, src: "punt", id: m.id, g: markupPoint(m) })).filter((p) => p.g)
+    ].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    $("rawInfo").textContent =
+      `Metingen: ${all.length} (waarvan ${all.length - S.meas.length} puntmetingen)\nPuntmarkeringen: ${singles.length}\n\n` +
+      "Voorbeeld meting:\n" + JSON.stringify(all[all.length - 1] || null, null, 1) +
+      "\n\nVoorbeeld puntmarkering:\n" + JSON.stringify(singles[singles.length - 1] || null, null, 1);
+    renderPoints();
     populateSelects();
     renderMeasurements();
   } catch (e) {
@@ -228,6 +280,7 @@ function setAxis(axis, sourceIds) {
   axisError("");
   renderAxis();
   renderMeasurements();
+  renderPoints();
   if (S.api) drawAxes();
 }
 
@@ -261,8 +314,10 @@ function fromManual() {
 function transform(fn) {
   if (!S.axis) return;
   S.axis = { ...fn(S.axis) };
-  renderAxis(); renderMeasurements();
+  renderAxis(); renderMeasurements(); renderPoints();
   if (S.api && S.drawnIds.length) drawAxes();
+  if (S.api && S.ptLabelIds.length) drawPointLabels();
+  if (S.api && S.measLabelIds.length) drawMeasLabels();
 }
 
 function renderAxis() {
@@ -363,6 +418,113 @@ $("measList").addEventListener("change", (e) => {
   renderMeasurements();
 });
 
+/* ---------- Coördinaatcontrole ---------- */
+function pointRows() {
+  if (!S.axis) return [];
+  return S.points.slice().reverse().map((p, i) => ({ ...p, l: LCS.toLocal(S.axis, p.g) }));
+}
+
+function pointEval(r) {
+  const c = S.pchecks[r.key]; if (!c) return null;
+  const tol = parseFloat($("tol").value) || 0;
+  const devs = ["nx", "ny", "nz"].map((k, i) => {
+    const n = parseFloat(c[k]); return Number.isFinite(n) ? r.l[i] - n : null;
+  });
+  if (devs.every((d) => d == null)) return null;
+  const set = devs.filter((d) => d != null);
+  return { devs, ok: set.every((d) => Math.abs(d) <= tol), d3: Math.hypot(...set) };
+}
+
+function pointName(r) { return (S.pchecks[r.key] && S.pchecks[r.key].name) || `${r.src === "punt" ? "Punt" : "Puntmeting"} ${r.id}`; }
+
+function renderPoints() {
+  const box = $("ptList");
+  if (!S.axis) { box.innerHTML = '<div class="empty">Leg eerst een lokale as vast.</div>'; return; }
+  const rows = pointRows();
+  if (!rows.length) { box.innerHTML = '<div class="empty">Nog geen punten. Gebruik de puntmeting in de viewer en klik op Vernieuwen.</div>'; return; }
+  const dv = (d) => d == null ? "–" : `${d >= 0 ? "+" : ""}${fmt(d)}`;
+  box.innerHTML = rows.map((r) => {
+    const c = S.pchecks[r.key] || {}; const ev = pointEval(r);
+    const v = (k) => c[k] ?? "";
+    return `<div class="card" data-key="${r.key}">
+      <div class="head"><input class="pname" value="${pointName(r).replace(/"/g, "&quot;")}" aria-label="Naam van het punt">
+        ${ev ? `<span class="verdict ${ev.ok ? "ok" : "nok"}">${ev.ok ? "OK" : "NOK"}</span>` : ""}</div>
+      <table>
+        <tr><th></th><th>X</th><th>Y</th><th>Z</th></tr>
+        <tr><td>Lokaal</td><td class="dx">${fmt(r.l[0])}</td><td class="dy">${fmt(r.l[1])}</td><td class="dz">${fmt(r.l[2])}</td></tr>
+        ${ev ? `<tr><td>Afwijking</td><td>${dv(ev.devs[0])}</td><td>${dv(ev.devs[1])}</td><td>${dv(ev.devs[2])}</td></tr>` : ""}
+      </table>
+      <div class="nom"><span>Theoretisch</span>
+        <input type="number" step="0.5" class="nx" value="${v("nx")}" placeholder="X" aria-label="Theoretische X">
+        <input type="number" step="0.5" class="ny" value="${v("ny")}" placeholder="Y" aria-label="Theoretische Y">
+        <input type="number" step="0.5" class="nz" value="${v("nz")}" placeholder="Z" aria-label="Theoretische Z">
+      </div>
+      <div class="glob">Globaal ${fmtP(r.g)}${ev ? ` · 3D-afwijking ${fmt(ev.d3)} mm` : ""}</div>
+    </div>`;
+  }).join("");
+}
+
+$("ptList").addEventListener("change", (e) => {
+  const card = e.target.closest(".card"); if (!card) return;
+  const q = (s) => card.querySelector(s).value;
+  S.pchecks[card.dataset.key] = { name: q(".pname"), nx: q(".nx"), ny: q(".ny"), nz: q(".nz") };
+  renderPoints();
+  if (S.api && S.ptLabelIds.length) drawPointLabels();
+});
+
+/* ---------- Labels in de viewer ---------- */
+const LABEL_COLOR = { r: 47, g: 93, b: 124, a: 255 };
+const f0 = (v) => v.toFixed(1).replace(".", ","); // zonder duizendtalpunt, zoals Trimble
+
+async function removeIds(ids) {
+  if (!S.api || !ids.length) return;
+  try { await S.api.markup.removeMarkups(ids); } catch (e) { /* al weg */ }
+}
+
+async function drawTexts(items) {
+  const res = await S.api.markup.addTextMarkup(items.map((t) => ({
+    text: t.text, color: LABEL_COLOR, start: vecToPick(t.at), end: vecToPick(t.to)
+  })));
+  return (res || []).map((m) => m.id).filter((id) => id != null);
+}
+
+async function drawPointLabels() {
+  if (!S.api || !S.axis) return;
+  await removeIds(S.ptLabelIds); S.ptLabelIds = [];
+  const rows = pointRows(); if (!rows.length) return;
+  try {
+    S.ptLabelIds = await drawTexts(rows.map((r) => ({
+      text: `${pointName(r)}: x ${f0(r.l[0])} | y ${f0(r.l[1])} | z ${f0(r.l[2])}`,
+      at: r.g, to: LCS.add(r.g, LCS.scale(S.axis.z, LABEL_OFFSET))
+    })));
+  } catch (e) { status("Labels tekenen mislukt: " + (e && e.message ? e.message : e), "err"); }
+}
+
+async function drawMeasLabels() {
+  if (!S.api || !S.axis) return;
+  await removeIds(S.measLabelIds); S.measLabelIds = [];
+  const rows = measRows(); if (!rows.length) return;
+  try {
+    S.measLabelIds = await drawTexts(rows.map((r) => {
+      const m = S.meas.find((x) => x.id === r.id);
+      const mid = LCS.scale(LCS.add(pickToVec(m.start), pickToVec(m.end)), 0.5);
+      return { text: `ΔX ${f0(r.dx)} | ΔY ${f0(r.dy)} | ΔZ ${f0(r.dz)}`, at: mid, to: LCS.add(mid, LCS.scale(S.axis.z, LABEL_OFFSET)) };
+    }));
+  } catch (e) { status("Labels tekenen mislukt: " + (e && e.message ? e.message : e), "err"); }
+}
+
+function exportPointCsv() {
+  const rows = pointRows(); if (!rows.length) return;
+  const n = (v) => (v == null ? "" : fmt(v, 1).replace(/\s/g, ""));
+  const head = ["As", "Punt", "Lokaal X", "Lokaal Y", "Lokaal Z", "Theor. X", "Theor. Y", "Theor. Z", "Afw. X", "Afw. Y", "Afw. Z", "3D-afwijking", "Tolerantie", "Resultaat", "Globaal X", "Globaal Y", "Globaal Z"];
+  const lines = rows.map((r) => {
+    const c = S.pchecks[r.key] || {}; const ev = pointEval(r);
+    return [S.axis.name, pointName(r), ...r.l.map(n), c.nx || "", c.ny || "", c.nz || "",
+      ...(ev ? ev.devs.map(n) : ["", "", ""]), ev ? n(ev.d3) : "", $("tol").value, ev ? (ev.ok ? "OK" : "NOK") : "", ...r.g.map(n)].join(";");
+  });
+  download(`coordinaatcontrole_${S.axis.name.replace(/[^\w.-]+/g, "_")}.csv`, "\uFEFF" + [head.join(";"), ...lines].join("\r\n"), "text/csv");
+}
+
 /* ---------- Export / import ---------- */
 function download(name, text, type) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -387,7 +549,7 @@ function importAxis(file) {
       S.axis = { O: j.O, x: j.x, y: j.y, z: j.z, base: j.base, offset: j.offset ?? null, mode: j.mode, name: j.name, created: j.created, sourceIds: [] };
       if (!LCS.check(S.axis)) throw new Error("As in bestand is niet orthonormaal.");
       $("axisName").value = j.name || "";
-      axisError(""); renderAxis(); renderMeasurements();
+      axisError(""); renderAxis(); renderMeasurements(); renderPoints();
       if (S.api) drawAxes();
     } catch (e) { axisError("Import mislukt: " + e.message); }
   };
@@ -422,7 +584,13 @@ $("btnExport").addEventListener("click", exportAxis);
 $("fileImport").addEventListener("change", (e) => e.target.files[0] && importAxis(e.target.files[0]));
 $("btnRefresh").addEventListener("click", refreshMeasurements);
 $("btnCsv").addEventListener("click", exportCsv);
-$("tol").addEventListener("input", renderMeasurements);
+$("tol").addEventListener("input", () => { renderMeasurements(); renderPoints(); });
+$("btnPtRefresh").addEventListener("click", refreshMeasurements);
+$("btnPtCsv").addEventListener("click", exportPointCsv);
+$("btnPtLabels").addEventListener("click", drawPointLabels);
+$("btnPtLabelsOff").addEventListener("click", async () => { await removeIds(S.ptLabelIds); S.ptLabelIds = []; });
+$("btnMeasLabels").addEventListener("click", drawMeasLabels);
+$("btnMeasLabelsOff").addEventListener("click", async () => { await removeIds(S.measLabelIds); S.measLabelIds = []; });
 $("axisName").addEventListener("change", () => { if (S.axis) { S.axis.name = $("axisName").value.trim() || S.axis.name; renderAxis(); } });
 
 init();
