@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lokale as – maatcontrole</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#FFFFFF; --panel:#F3F5F7; --ink:#1C2630; --muted:#5B6875; --line:#D5DBE1;
+    --steel:#2F5D7C; --steel-ink:#FFFFFF;
+    --ax-x:#D0342C; --ax-y:#2E8B3A; --ax-z:#2563C9;
+    --ok:#2E8B3A; --nok:#D0342C; --warn:#A86A00;
+    --sans:"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono:"IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans)}
+  main{padding:12px 14px 32px;max-width:520px}
+  h1{font-size:16px;font-weight:600;margin:0 0 2px}
+  h2{font-size:14px;font-weight:600;margin:0 0 8px;display:flex;gap:8px;align-items:baseline}
+  h2 .n{color:var(--steel);font-family:var(--mono)}
+  p{margin:0 0 8px}
+  .muted{color:var(--muted);font-size:13px}
+  section{border-top:1px solid var(--line);padding:14px 0}
+  #status{font-size:12px;margin-bottom:10px;padding:6px 8px;border-radius:4px;background:var(--panel)}
+  #status.ok{color:var(--ok)} #status.warn{color:var(--warn)} #status.err{color:var(--nok)}
+  .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
+  label{font-size:13px}
+  input[type=text],input[type=number],select{font:13px var(--sans);padding:5px 6px;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--ink);min-width:0}
+  input[type=number]{width:84px;font-family:var(--mono)}
+  button{font:500 13px var(--sans);padding:6px 10px;border-radius:4px;border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer}
+  button.primary{background:var(--steel);border-color:var(--steel);color:var(--steel-ink)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--steel);outline-offset:1px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+  .seg label{padding:5px 10px;cursor:pointer;background:#fff}
+  .seg input{position:absolute;opacity:0;pointer-events:none}
+  .seg input:checked+span{font-weight:600;color:var(--steel)}
+  .seg label:has(input:checked){background:var(--panel)}
+  .err-box{color:var(--nok);font-size:13px;margin:6px 0;display:none}
+  /* Assenblok: het ene visuele anker van het paneel */
+  .triad{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-family:var(--mono);font-size:12.5px;background:var(--panel);padding:10px;border-radius:4px;margin:8px 0}
+  .triad dt{font-weight:500} .triad dd{margin:0;overflow-wrap:anywhere}
+  .ax-x{color:var(--ax-x)} .ax-y{color:var(--ax-y)} .ax-z{color:var(--ax-z)}
+  .meta{font-size:12.5px;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:right;font-weight:500;color:var(--muted);padding:4px 4px;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  td{text-align:right;padding:4px;font-family:var(--mono);border-bottom:1px solid var(--line);white-space:nowrap}
+  td.dx{border-left:3px solid var(--ax-x)} td.dy{border-left:3px solid var(--ax-y)} td.dz{border-left:3px solid var(--ax-z)}
+  .card{border:1px solid var(--line);border-radius:4px;padding:8px;margin:8px 0}
+  .card .head{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);margin-bottom:4px}
+  .verdict{font:600 12.5px var(--sans)}
+  .verdict.ok{color:var(--ok)} .verdict.nok{color:var(--nok)}
+  details summary{cursor:pointer;font-size:13px;color:var(--steel);margin:6px 0}
+  .grid3{display:grid;grid-template-columns:28px repeat(3,1fr);gap:4px;align-items:center}
+  .grid3 input{width:100%}
+  .empty{background:var(--panel);padding:10px;border-radius:4px;font-size:13px;color:var(--muted)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Lokale as – maatcontrole</h1>
+  <div id="status">Verbinden…</div>
+
+  <section>
+    <h2><span class="n">1</span>Lokale as vastleggen</h2>
+    <div class="row">
+      <div class="seg" role="radiogroup" aria-label="Methode">
+        <label><input type="radio" name="mode" value="3p" checked><span>3 punten</span></label>
+        <label><input type="radio" name="mode" value="2p"><span>2 punten + verticaal</span></label>
+      </div>
+    </div>
+    <p class="muted" id="instr"></p>
+    <div class="row">
+      <label>O → X <select id="selA" aria-label="Meting van O naar X"></select></label>
+      <label id="selBwrap">O → XY <select id="selB" aria-label="Meting van O naar XY-punt"></select></label>
+    </div>
+    <div class="row">
+      <input type="text" id="axisName" placeholder="Naam, bv. SEG-12 werkhuis" style="flex:1">
+      <button class="primary" id="btnFromMeas">As overnemen uit metingen</button>
+    </div>
+    <div class="err-box" id="axisErr"></div>
+
+    <div id="axisView" hidden>
+      <dl class="triad">
+        <dt>O</dt><dd id="vO"></dd>
+        <dt class="ax-x">X</dt><dd id="vX"></dd>
+        <dt class="ax-y">Y</dt><dd id="vY"></dd>
+        <dt class="ax-z">Z</dt><dd id="vZ"></dd>
+      </dl>
+      <p class="meta" id="axisMeta"></p>
+      <div class="row">
+        <button id="btnFlipX" title="180° draaien om Z">X omkeren</button>
+        <button id="btnFlipY" title="180° draaien om X">Y omkeren</button>
+        <button id="btnRot" title="+90° draaien om Z">90° om Z</button>
+      </div>
+      <div class="row">
+        <label>Aslengte <input type="number" id="axLen" value="1000" min="100" step="100"> mm</label>
+        <button id="btnDraw">Assen tonen</button>
+        <button id="btnClear">Assen verbergen</button>
+      </div>
+      <div class="row">
+        <button id="btnExport">As exporteren (JSON)</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <label for="fileImport" class="muted">As importeren:</label>
+      <input type="file" id="fileImport" accept="application/json">
+    </div>
+
+    <details>
+      <summary>Coördinaten handmatig invoeren (mm)</summary>
+      <div class="grid3">
+        <span></span><span class="muted">X</span><span class="muted">Y</span><span class="muted">Z</span>
+        <span>O</span><input type="number" id="mO0"><input type="number" id="mO1"><input type="number" id="mO2">
+        <span>X</span><input type="number" id="mX0"><input type="number" id="mX1"><input type="number" id="mX2">
+        <span id="mXYlab">XY</span><input type="number" id="mXY0"><input type="number" id="mXY1"><input type="number" id="mXY2">
+      </div>
+      <div class="row"><button id="btnManual">As berekenen</button></div>
+    </details>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>Maatcontrole</h2>
+    <p class="muted">Meet met de afstandstool van Trimble Connect. Elke meting verschijnt hieronder in lokale coördinaten. Vul de werkelijk gemeten waarde in om de afwijking te zien.</p>
+    <div class="row">
+      <label>Tolerantie ± <input type="number" id="tol" value="2" min="0" step="0.5"> mm</label>
+      <button id="btnRefresh">Vernieuwen</button>
+      <button id="btnCsv">CSV exporteren</button>
+    </div>
+    <div id="measList"></div>
+  </section>
+</main>
+
+<script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+<script src="lcs.js"></script>
+<script>
+"use strict";
+/* ---------- Toestand ---------- */
+const S = {
+  api: null,
+  axis: null,          // {O,x,y,z,base,offset,mode,name,created,sourceIds}
+  meas: [],            // metingen uit de viewer
+  checks: {},          // per meting-id: {comp, measured}
+  drawnIds: []         // markup-id's die deze extensie tekende
+};
+const SNAP_ERR = 0.5;  // aangenomen snapfout per punt (mm) voor de indicatie
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 1) => Number(v).toLocaleString("nl-BE", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtV = (v) => v.map((c) => fmt(c, 4)).join("  ");
+const fmtP = (v) => v.map((c) => fmt(c, 1)).join("  ");
+const pickToVec = (p) => [p.positionX, p.positionY, p.positionZ];
+const vecToPick = (v) => ({ positionX: v[0], positionY: v[1], positionZ: v[2] });
+const mode = () => document.querySelector("input[name=mode]:checked").value;
+
+function status(msg, kind) { const el = $("status"); el.textContent = msg; el.className = kind || ""; }
+function axisError(msg) { const el = $("axisErr"); el.textContent = msg || ""; el.style.display = msg ? "block" : "none"; }
+
+/* ---------- Verbinding ---------- */
+let refreshTimer = null;
+function onEvent(event) {
+  if (event === "viewer.onMarkupChanged") {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshMeasurements, 250);
+  }
+}
+
+async function init() {
+  updateInstructions();
+  populateSelects();
+  renderMeasurements();
+  if (window.parent === window) {
+    status("Niet geladen in Trimble Connect. Alleen handmatige invoer werkt.", "warn");
+    return;
+  }
+  try {
+    S.api = await TrimbleConnectWorkspace.connect(window.parent, onEvent, 30000);
+    status("Verbonden met Trimble Connect.", "ok");
+    await refreshMeasurements();
+  } catch (e) {
+    status("Verbinding met Trimble Connect mislukt: " + (e && e.message ? e.message : e), "err");
+  }
+}
+
+async function refreshMeasurements() {
+  if (!S.api) return;
+  try {
+    const list = await S.api.markup.getMeasurementMarkups();
+    S.meas = (list || []).filter((m) => m && m.start && m.end)
+      .sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    populateSelects();
+    renderMeasurements();
+  } catch (e) {
+    status("Metingen uitlezen mislukt: " + (e && e.message ? e.message : e), "err");
+  }
+}
+
+/* ---------- As vastleggen ---------- */
+function populateSelects() {
+  const opts = S.meas.slice().reverse().map((m) =>
+    `<option value="${m.id}">Meting ${m.id} (${fmt(LCS.len(LCS.sub(pickToVec(m.end), pickToVec(m.start))), 0)} mm)</option>`).join("");
+  const n = S.meas.length;
+  [["selA", n >= 2 ? S.meas[n - 2].id : S.meas[n - 1]?.id], ["selB", S.meas[n - 1]?.id]].forEach(([id, def]) => {
+    const el = $(id), prev = el.value;
+    el.innerHTML = opts || '<option value="">geen metingen</option>';
+    el.value = S.meas.some((m) => String(m.id) === prev) ? prev : (def ?? "");
+  });
+  if (mode() === "2p" && n && !S.meas.some((m) => String(m.id) === $("selA").dataset.touched)) $("selA").value = S.meas[n - 1].id;
+}
+
+function updateInstructions() {
+  const three = mode() === "3p";
+  $("instr").textContent = three
+    ? "Meet van O naar een punt op de X-as, zo ver mogelijk van O. Meet daarna van O naar een punt in het XY-vlak aan de +Y-kant. Kies beide metingen hieronder."
+    : "Meet van O naar een punt op de X-as, zo ver mogelijk van O. Z volgt uit de globale verticale. Kies de meting hieronder.";
+  $("selBwrap").style.display = three ? "" : "none";
+  $("mXYlab").style.opacity = three ? 1 : .35;
+  ["mXY0", "mXY1", "mXY2"].forEach((id) => ($(id).disabled = !three));
+}
+
+function setAxis(axis, sourceIds) {
+  S.axis = { ...axis, name: $("axisName").value.trim() || "Naamloze as", created: new Date().toISOString(), sourceIds: sourceIds || [] };
+  axisError("");
+  renderAxis();
+  renderMeasurements();
+  if (S.api) drawAxes();
+}
+
+function fromMeasurements() {
+  axisError("");
+  const m = mode();
+  const find = (id) => S.meas.find((x) => String(x.id) === String(id));
+  const mA = find($("selA").value), mB = find($("selB").value);
+  if (!mA || (m === "3p" && !mB)) { axisError("Maak eerst de nodige meting(en) met de afstandstool en kies ze hierboven."); return; }
+  if (m === "3p" && mA === mB) { axisError("Kies twee verschillende metingen voor O → X en O → XY."); return; }
+  if (m === "3p" && LCS.len(LCS.sub(pickToVec(mA.start), pickToVec(mB.start))) > 1) {
+    axisError("Let op: beide metingen starten niet in hetzelfde punt. O wordt genomen uit de meting O → X.");
+  }
+  const O = pickToVec(mA.start), PX = pickToVec(mA.end);
+  let PXY = null, ids = [mA.id];
+  if (m === "3p") { PXY = pickToVec(mB.end); ids.push(mB.id); }
+  const warn = $("axisErr").textContent;
+  try { setAxis(LCS.buildAxis(O, PX, PXY, m), ids); if (warn.startsWith("Let op")) axisError(warn); }
+  catch (e) { axisError(e.message); }
+}
+
+function fromManual() {
+  const read = (p) => [0, 1, 2].map((i) => parseFloat($(p + i).value));
+  const O = read("mO"), PX = read("mX"), PXY = read("mXY");
+  const bad = (v) => v.some((c) => !Number.isFinite(c));
+  if (bad(O) || bad(PX) || (mode() === "3p" && bad(PXY))) { axisError("Vul alle coördinaten in (mm)."); return; }
+  try { setAxis(LCS.buildAxis(O, PX, mode() === "3p" ? PXY : null, mode()), []); }
+  catch (e) { axisError(e.message); }
+}
+
+function transform(fn) {
+  if (!S.axis) return;
+  S.axis = { ...fn(S.axis) };
+  renderAxis(); renderMeasurements();
+  if (S.api && S.drawnIds.length) drawAxes();
+}
+
+function renderAxis() {
+  const a = S.axis;
+  $("axisView").hidden = !a;
+  if (!a) return;
+  $("vO").textContent = fmtP(a.O);
+  $("vX").textContent = fmtV(a.x);
+  $("vY").textContent = fmtV(a.y);
+  $("vZ").textContent = fmtV(a.z);
+  const err10 = LCS.angularErrorAt(a, 10000, SNAP_ERR);
+  $("axisMeta").textContent =
+    `${a.name}. Basislijn ${fmt(a.base, 0)} mm${a.offset != null ? `, XY-punt ${fmt(a.offset, 0)} mm naast X-as` : ", Z uit verticale"}. ` +
+    `Richtfout bij ${fmt(SNAP_ERR)} mm snapfout: ±${fmt(err10, 2)} mm op 10 m.` +
+    (LCS.check(a) ? "" : " Controle orthonormaliteit mislukt.");
+}
+
+/* ---------- Assen tekenen ---------- */
+async function clearAxes() {
+  if (!S.api || !S.drawnIds.length) return;
+  try { await S.api.markup.removeMarkups(S.drawnIds); } catch (e) { /* al verwijderd */ }
+  S.drawnIds = [];
+}
+
+async function drawAxes() {
+  if (!S.api || !S.axis) return;
+  await clearAxes();
+  const a = S.axis, L = Math.max(100, parseFloat($("axLen").value) || 1000);
+  const axes = [["X", a.x, { r: 208, g: 52, b: 44, a: 255 }], ["Y", a.y, { r: 46, g: 139, b: 58, a: 255 }], ["Z", a.z, { r: 37, g: 99, b: 201, a: 255 }]];
+  try {
+    const lines = await S.api.markup.addLineMarkups(axes.map(([, d, c]) => ({
+      start: vecToPick(a.O), end: vecToPick(LCS.add(a.O, LCS.scale(d, L))), color: c
+    })));
+    const texts = await S.api.markup.addTextMarkup(axes.map(([t, d, c]) => ({
+      text: t, color: c,
+      start: vecToPick(LCS.add(a.O, LCS.scale(d, L))),
+      end: vecToPick(LCS.add(a.O, LCS.scale(d, L * 1.08)))
+    })));
+    S.drawnIds = [...(lines || []), ...(texts || [])].map((m) => m.id).filter((id) => id != null);
+  } catch (e) {
+    status("Assen tekenen mislukt: " + (e && e.message ? e.message : e), "err");
+  }
+}
+
+/* ---------- Maatcontrole ---------- */
+const COMPS = { dx: "ΔX", dy: "ΔY", dz: "ΔZ", L: "Lengte" };
+
+function measRows() {
+  if (!S.axis) return [];
+  const used = new Set(S.axis.sourceIds || []);
+  return S.meas.filter((m) => !used.has(m.id)).slice().reverse().map((m) => {
+    const ps = LCS.toLocal(S.axis, pickToVec(m.start));
+    const pe = LCS.toLocal(S.axis, pickToVec(m.end));
+    const d = LCS.sub(pe, ps);
+    return { id: m.id, ps, pe, dx: d[0], dy: d[1], dz: d[2], L: LCS.len(d) };
+  });
+}
+
+function evaluate(r) {
+  const c = S.checks[r.id];
+  if (!c || c.measured === "" || c.measured == null || !Number.isFinite(parseFloat(c.measured))) return null;
+  const model = c.comp === "L" ? r.L : r[c.comp];
+  // ΔX/ΔY/ΔZ: vergelijk absolute waarden (de werkhuismeting heeft geen teken)
+  const dev = parseFloat(c.measured) - (c.comp === "L" ? model : Math.abs(model));
+  const tol = parseFloat($("tol").value) || 0;
+  return { dev, ok: Math.abs(dev) <= tol };
+}
+
+function renderMeasurements() {
+  const box = $("measList");
+  if (!S.axis) { box.innerHTML = '<div class="empty">Leg eerst een lokale as vast.</div>'; return; }
+  const rows = measRows();
+  if (!rows.length) { box.innerHTML = '<div class="empty">Nog geen controlemetingen. Meet met de afstandstool in de viewer.</div>'; return; }
+  box.innerHTML = rows.map((r) => {
+    const c = S.checks[r.id] || { comp: "dx", measured: "" };
+    const ev = evaluate(r);
+    return `<div class="card" data-id="${r.id}">
+      <div class="head"><span>Meting ${r.id}</span>${ev ? `<span class="verdict ${ev.ok ? "ok" : "nok"}">${ev.ok ? "OK" : "NOK"} · afwijking ${ev.dev >= 0 ? "+" : ""}${fmt(ev.dev)} mm</span>` : ""}</div>
+      <table>
+        <tr><th></th><th>X</th><th>Y</th><th>Z</th></tr>
+        <tr><td>Start</td><td>${fmt(r.ps[0])}</td><td>${fmt(r.ps[1])}</td><td>${fmt(r.ps[2])}</td></tr>
+        <tr><td>Eind</td><td>${fmt(r.pe[0])}</td><td>${fmt(r.pe[1])}</td><td>${fmt(r.pe[2])}</td></tr>
+        <tr><td>Δ</td><td class="dx">${fmt(r.dx)}</td><td class="dy">${fmt(r.dy)}</td><td class="dz">${fmt(r.dz)}</td></tr>
+      </table>
+      <div class="row">
+        <span class="meta">Lengte ${fmt(r.L)} mm</span>
+        <select class="comp" aria-label="Te controleren maat">${Object.entries(COMPS).map(([k, v]) => `<option value="${k}" ${c.comp === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+        <input type="number" class="measured" step="0.5" placeholder="gemeten" value="${c.measured}" aria-label="Gemeten waarde in mm"> mm
+      </div>
+    </div>`;
+  }).join("");
+}
+
+$("measList").addEventListener("change", (e) => {
+  const card = e.target.closest(".card"); if (!card) return;
+  const id = Number(card.dataset.id);
+  S.checks[id] = { comp: card.querySelector(".comp").value, measured: card.querySelector(".measured").value };
+  renderMeasurements();
+});
+
+/* ---------- Export / import ---------- */
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a"); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function exportAxis() {
+  if (!S.axis) return;
+  const { O, x, y, z, base, offset, mode, name, created, sourceIds } = S.axis;
+  download(`${name.replace(/[^\w.-]+/g, "_")}.lcs.json`, JSON.stringify({ version: 1, units: "mm", name, created, mode, base, offset, O, x, y, z, sourceIds }, null, 2), "application/json");
+}
+
+function importAxis(file) {
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const j = JSON.parse(r.result);
+      const ok = ["O", "x", "y", "z"].every((k) => Array.isArray(j[k]) && j[k].length === 3);
+      if (!ok || j.units !== "mm") throw new Error("Ongeldig asbestand.");
+      S.axis = { O: j.O, x: j.x, y: j.y, z: j.z, base: j.base, offset: j.offset ?? null, mode: j.mode, name: j.name, created: j.created, sourceIds: [] };
+      if (!LCS.check(S.axis)) throw new Error("As in bestand is niet orthonormaal.");
+      $("axisName").value = j.name || "";
+      axisError(""); renderAxis(); renderMeasurements();
+      if (S.api) drawAxes();
+    } catch (e) { axisError("Import mislukt: " + e.message); }
+  };
+  r.readAsText(file);
+}
+
+function exportCsv() {
+  const rows = measRows();
+  if (!rows.length) return;
+  const n = (v) => fmt(v, 1).replace(/\s/g, "");
+  const head = ["As", "Meting", "Start X", "Start Y", "Start Z", "Eind X", "Eind Y", "Eind Z", "dX", "dY", "dZ", "Lengte", "Maat", "Gemeten", "Afwijking", "Tolerantie", "Resultaat"];
+  const tol = $("tol").value;
+  const lines = rows.map((r) => {
+    const c = S.checks[r.id] || {}; const ev = evaluate(r);
+    return [S.axis.name, r.id, ...r.ps.map(n), ...r.pe.map(n), n(r.dx), n(r.dy), n(r.dz), n(r.L),
+      c.comp ? COMPS[c.comp] : "", c.measured || "", ev ? n(ev.dev) : "", tol, ev ? (ev.ok ? "OK" : "NOK") : ""].join(";");
+  });
+  download(`maatcontrole_${S.axis.name.replace(/[^\w.-]+/g, "_")}.csv`, "\uFEFF" + [head.join(";"), ...lines].join("\r\n"), "text/csv");
+}
+
+/* ---------- Koppelingen ---------- */
+document.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", () => { updateInstructions(); populateSelects(); }));
+$("selA").addEventListener("change", (e) => (e.target.dataset.touched = e.target.value));
+$("btnFromMeas").addEventListener("click", async () => { await refreshMeasurements(); fromMeasurements(); });
+$("btnManual").addEventListener("click", fromManual);
+$("btnFlipX").addEventListener("click", () => transform(LCS.flipX));
+$("btnFlipY").addEventListener("click", () => transform(LCS.flipY));
+$("btnRot").addEventListener("click", () => transform(LCS.rotZ90));
+$("btnDraw").addEventListener("click", drawAxes);
+$("btnClear").addEventListener("click", clearAxes);
+$("btnExport").addEventListener("click", exportAxis);
+$("fileImport").addEventListener("change", (e) => e.target.files[0] && importAxis(e.target.files[0]));
+$("btnRefresh").addEventListener("click", refreshMeasurements);
+$("btnCsv").addEventListener("click", exportCsv);
+$("tol").addEventListener("input", renderMeasurements);
+$("axisName").addEventListener("change", () => { if (S.axis) { S.axis.name = $("axisName").value.trim() || S.axis.name; renderAxis(); } });
+
+init();
+</script>
+</body>
+</html>
