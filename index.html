@@ -182,6 +182,15 @@
       <h3 id="dlgTitle">Kies je selectie</h3>
       <p class="muted">Selecteer in de viewer de platen waarvan je de hoekpunten wilt zien. Ctrl+klik voegt platen toe.</p>
       <p class="selcount" id="selCount">Nog niets geselecteerd.</p>
+      <div class="row">
+        <label>Punten
+          <select id="cornerMode">
+            <option value="top" selected>Uiterste hoeken – bovenvlak</option>
+            <option value="both">Uiterste hoeken – boven- en ondervlak</option>
+            <option value="all">Alle hoekpunten</option>
+          </select>
+        </label>
+      </div>
       <p class="meta">Model: <span id="ifcStatus">nog niet geladen</span></p>
       <div class="row" id="ifcLoadRow">
         <button id="btnIfcProject">IFC laden uit project</button>
@@ -771,7 +780,9 @@ async function placeCorners() {
     const seen = new Set(); let total = 0;
     S.corners = geo.map((o) => {
       const inf = S.ifc.index.info.get(o.eid) || {};
-      const pts = IfcGeom.cornerPoints(o.tris)
+      const mode = $("cornerMode").value;
+      const raw = mode === "all" ? IfcGeom.cornerPoints(o.tris) : IfcGeom.outerCorners(o.tris, S.axis.z, mode);
+      const pts = raw
         .map((p) => { const g = LCS.add(p, cal.off); return { g, l: LCS.toLocal(S.axis, g) }; })
         .filter((q) => { const k = q.g.map((v) => Math.round(v / 0.5)).join(","); if (seen.has(k)) return false; seen.add(k); return true; })
         .sort((a, b) => a.l[0] - b.l[0] || a.l[1] - b.l[1] || a.l[2] - b.l[2]);
