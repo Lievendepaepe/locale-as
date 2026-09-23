@@ -65,6 +65,9 @@
   .pname{font:500 12.5px var(--sans);border:1px solid transparent;padding:2px 4px;width:140px}
   .pname:hover,.pname:focus{border-color:var(--line)}
   pre.raw{font:11px var(--mono);background:var(--panel);padding:8px;overflow:auto;max-height:200px}
+  .dialog{border:2px solid var(--steel);border-radius:6px;padding:12px;margin:8px 0;background:#fff}
+  .dialog h3{font-size:15px;font-weight:600;margin:0 0 6px;color:var(--steel)}
+  .selcount{font-size:14px;font-weight:500;margin:8px 0;padding:8px;background:var(--panel);border-radius:4px}
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -148,6 +151,14 @@
   </section>
 
   <section>
+    <h2>Puntcontrole</h2>
+    <div class="seg" role="radiogroup" aria-label="Werkwijze puntcontrole">
+      <label><input type="radio" name="pmode" value="3" checked><span>Stap 3 – manueel</span></label>
+      <label><input type="radio" name="pmode" value="4"><span>Stap 4 – automatisch</span></label>
+    </div>
+  </section>
+
+  <section id="sec3">
     <h2><span class="n">3</span>Coördinaatcontrole</h2>
     <p class="muted">Plaats punten met de puntmeting van Trimble Connect. Elk punt verschijnt hieronder in lokale coördinaten. Vul de theoretische waarden uit de werkhuistekening in om de afwijking per as te zien.</p>
     <div class="row">
@@ -164,10 +175,40 @@
       <pre class="raw" id="rawInfo">Nog geen gegevens.</pre>
     </details>
   </section>
+
+  <section id="sec4" hidden>
+    <h2><span class="n">4</span>Hoekpunten van platen</h2>
+    <div class="dialog" id="selDialog" role="dialog" aria-labelledby="dlgTitle">
+      <h3 id="dlgTitle">Kies je selectie</h3>
+      <p class="muted">Selecteer in de viewer de platen waarvan je de hoekpunten wilt zien. Ctrl+klik voegt platen toe.</p>
+      <p class="selcount" id="selCount">Nog niets geselecteerd.</p>
+      <p class="meta">Model: <span id="ifcStatus">nog niet geladen</span></p>
+      <div class="row" id="ifcLoadRow">
+        <button id="btnIfcProject">IFC laden uit project</button>
+        <label class="muted">of bestand: <input type="file" id="fileIfc" accept=".ifc"></label>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnCorners" disabled>Coördinaten plaatsen</button>
+        <button id="btnDlgCancel">Annuleren</button>
+      </div>
+      <div class="err-box" id="cornerErr"></div>
+    </div>
+    <div id="cornerResult" hidden>
+      <p class="meta" id="cornerSummary"></p>
+      <p class="meta" id="calInfo"></p>
+      <div class="row">
+        <button id="btnNewSel">Nieuwe selectie</button>
+        <button id="btnCornersOff">Coördinaten verbergen</button>
+        <button id="btnCornersCsv">CSV exporteren</button>
+      </div>
+      <div id="cornerList"></div>
+    </div>
+  </section>
 </main>
 
 <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
 <script src="lcs.js"></script>
+<script src="ifcgeom.js"></script>
 <script>
 "use strict";
 /* ---------- Toestand ---------- */
@@ -180,8 +221,18 @@ const S = {
   points: [],          // {key, src, id, g:[x,y,z]}
   pchecks: {},         // per punt-key: {name, nx, ny, nz}
   measLabelIds: [],    // tekstlabels bij metingen
-  ptLabelIds: []       // tekstlabels bij punten
+  ptLabelIds: [],      // tekstlabels bij punten
+  token: null,         // Trimble access token (stap 4)
+  ifc: null,           // {api, modelID, index, name}
+  sel: [],             // huidige selectie in de viewer
+  corners: [],         // [{name, tag, type, pts:[{g,l}]}]
+  cornerLabelIds: []
 };
+const WEBIFC_CDN = "https://cdn.jsdelivr.net/npm/web-ifc@0.0.66/";
+const TC_HOSTS = ["https://app21.connect.trimble.com", "https://app.connect.trimble.com", "https://app31.connect.trimble.com", "https://app32.connect.trimble.com"];
+const MAX_LABELS = 400;  // bovengrens labels in de viewer
+const CAL_TOL = 5;       // mm: max. restafwijking IFC ↔ viewer
+let tokenWaiters = [], selTimer = null, ifcTried = false;
 const ZERO_LEN = 0.01; // meting korter dan dit (mm) = puntmeting
 const LABEL_OFFSET = 250; // afstand label tot punt (mm)
 const SNAP_ERR = 0.5;  // aangenomen snapfout per punt (mm) voor de indicatie
@@ -202,7 +253,14 @@ function axisError(msg) { const el = $("axisErr"); el.textContent = msg || ""; e
 
 /* ---------- Verbinding ---------- */
 let refreshTimer = null;
-function onEvent(event) {
+function onEvent(event, data) {
+  if (event === "extension.accessToken") {
+    const t = data && typeof data === "object" ? data.data : data;
+    if (t && t !== "pending" && t !== "denied") { S.token = t; tokenWaiters.forEach((f) => f(t)); tokenWaiters = []; }
+  }
+  if (event === "viewer.onSelectionChanged") {
+    clearTimeout(selTimer); selTimer = setTimeout(updateSelection, 200);
+  }
   if (event === "viewer.onMarkupChanged") {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refreshMeasurements, 250);
@@ -281,6 +339,7 @@ function setAxis(axis, sourceIds) {
   renderAxis();
   renderMeasurements();
   renderPoints();
+  if (!$("sec4").hidden) updateSelection();
   if (S.api) drawAxes();
 }
 
@@ -318,6 +377,7 @@ function transform(fn) {
   if (S.api && S.drawnIds.length) drawAxes();
   if (S.api && S.ptLabelIds.length) drawPointLabels();
   if (S.api && S.measLabelIds.length) drawMeasLabels();
+  if (S.corners.length) { S.corners.forEach((c) => c.pts.forEach((q) => (q.l = LCS.toLocal(S.axis, q.g)))); renderCorners(); if (S.cornerLabelIds.length) drawCornerLabels(); }
 }
 
 function renderAxis() {
@@ -525,6 +585,245 @@ function exportPointCsv() {
   download(`coordinaatcontrole_${S.axis.name.replace(/[^\w.-]+/g, "_")}.csv`, "\uFEFF" + [head.join(";"), ...lines].join("\r\n"), "text/csv");
 }
 
+/* ---------- Stap 3 / stap 4 kiezen ---------- */
+function setPointMode(m) {
+  document.querySelector(`input[name=pmode][value="${m}"]`).checked = true;
+  $("sec3").hidden = m !== "3";
+  $("sec4").hidden = m !== "4";
+  if (m === "4") openSelDialog();
+}
+
+function openSelDialog() {
+  $("selDialog").hidden = false;
+  $("cornerResult").hidden = !S.corners.length;
+  cornerError("");
+  updateSelection();
+  if (!S.ifc && !ifcTried && S.api) { ifcTried = true; loadIfcFromProject(); }
+}
+
+/* ---------- Stap 4: hoekpunten van platen ---------- */
+function cornerError(msg) { const el = $("cornerErr"); el.textContent = msg || ""; el.style.display = msg ? "block" : "none"; }
+const errMsg = (e) => (e && e.message) ? e.message : String(e);
+
+function updateButton() {
+  const n = S.sel.reduce((a, g) => a + g.objectRuntimeIds.length, 0);
+  $("btnCorners").disabled = !(S.axis && S.ifc && n > 0);
+  $("btnCorners").title = !S.axis ? "Leg eerst een lokale as vast (stap 1)" : !S.ifc ? "Laad eerst het IFC-bestand" : n ? "" : "Selecteer eerst platen in de viewer";
+}
+
+async function updateSelection() {
+  if (!S.api) { $("selCount").textContent = "Niet verbonden met Trimble Connect."; return; }
+  try {
+    S.sel = ((await S.api.viewer.getSelection()) || []).filter((g) => g.objectRuntimeIds && g.objectRuntimeIds.length);
+  } catch (e) { S.sel = []; }
+  const n = S.sel.reduce((a, g) => a + g.objectRuntimeIds.length, 0);
+  let txt = n ? `${n} object${n === 1 ? "" : "en"} geselecteerd.` : "Nog niets geselecteerd.";
+  if (n && S.ifc) {
+    const types = {};
+    for (const g of S.sel) {
+      const ext = await toExternalIds(g);
+      ext.forEach((x) => {
+        const eid = S.ifc.index.byGuid.get(IfcGeom.guidToHex(x));
+        const t = eid != null ? (S.ifc.index.info.get(eid) || {}).type || "onbekend" : "niet in IFC";
+        types[t] = (types[t] || 0) + 1;
+      });
+    }
+    txt += " " + Object.entries(types).map(([t, c]) => `${c}× ${t.replace(/^Ifc/, "")}`).join(", ") + ".";
+    const nonPlate = Object.entries(types).filter(([t]) => !/Plate/i.test(t)).reduce((a, [, c]) => a + c, 0);
+    if (nonPlate) txt += ` Let op: ${nonPlate} object(en) zijn geen plaat en krijgen ook hoekpunten.`;
+  }
+  if (!S.axis) txt += " Leg eerst een lokale as vast in stap 1.";
+  $("selCount").textContent = txt;
+  updateButton();
+}
+
+async function toExternalIds(g) {
+  try { return await S.api.viewer.convertToObjectIds(g.modelId, g.objectRuntimeIds); }
+  catch (e) { return Promise.all(g.objectRuntimeIds.map((id) => S.api.viewer.convertToObjectIds(g.modelId, [id]).then((r) => r[0]).catch(() => null))); }
+}
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = src; s.onload = res;
+    s.onerror = () => rej(new Error("Kan " + src + " niet laden.")); document.head.appendChild(s);
+  });
+}
+
+async function ensureWebIfc() {
+  if (!window.WebIFC) await loadScript(WEBIFC_CDN + "web-ifc-api-iife.js");
+  if (!S.ifcApi) {
+    const api = new WebIFC.IfcAPI();
+    api.SetWasmPath(WEBIFC_CDN, true);
+    await api.Init(undefined, true); // single-thread: geen SharedArrayBuffer nodig
+    S.ifcApi = api;
+  }
+  return S.ifcApi;
+}
+
+async function openIfc(bytes, name) {
+  $("ifcStatus").textContent = `inlezen: ${name}…`;
+  const api = await ensureWebIfc();
+  if (S.ifc) { try { api.CloseModel(S.ifc.modelID); } catch (e) { /* */ } }
+  const modelID = api.OpenModel(bytes, { COORDINATE_TO_ORIGIN: false, CIRCLE_SEGMENTS: 24 });
+  const index = IfcGeom.buildIndex(WebIFC, api, modelID);
+  S.ifc = { api, modelID, index, name };
+  $("ifcStatus").textContent = `${name} (${index.byGuid.size} objecten)`;
+  $("ifcLoadRow").hidden = true;
+  updateSelection();
+}
+
+async function getToken() {
+  if (S.token) return S.token;
+  const r = await S.api.extension.requestPermission("accesstoken");
+  if (r === "denied") throw new Error("Toegang tot je Trimble-sessie geweigerd. Kies het IFC-bestand zelf.");
+  if (r && r !== "pending") { S.token = r; return r; }
+  $("ifcStatus").textContent = "bevestig in Trimble Connect dat de extensie je sessie mag gebruiken…";
+  return new Promise((res, rej) => {
+    tokenWaiters.push(res);
+    setTimeout(() => rej(new Error("Geen toestemming ontvangen binnen 60 seconden.")), 60000);
+  });
+}
+
+async function loadIfcFromProject() {
+  cornerError("");
+  if (!S.api) { cornerError("Niet verbonden met Trimble Connect. Kies het IFC-bestand zelf."); return; }
+  try {
+    const sel = await S.api.viewer.getSelection();
+    let modelId = sel && sel[0] && sel[0].modelId;
+    if (!modelId) { const ms = await S.api.viewer.getModels("loaded"); modelId = ms && ms[0] && ms[0].id; }
+    if (!modelId) throw new Error("Geen geladen model gevonden.");
+    const file = (await S.api.viewer.getLoadedModel(modelId)) || {};
+    const fileId = file.id || modelId, versionId = file.versionId, name = file.name || "model.ifc";
+    if (/\.ifczip$/i.test(name)) throw new Error("IFCZIP wordt niet ondersteund. Pak het uit en kies het .ifc-bestand zelf.");
+    if (file.name && !/\.ifc$/i.test(name)) throw new Error(`Het geladen model (${name}) is geen IFC-bestand.`);
+    const token = await getToken();
+    $("ifcStatus").textContent = "downloadlink opvragen…";
+    let url = null, lastErr = "";
+    for (const host of TC_HOSTS) {
+      try {
+        const r = await fetch(`${host}/tc/api/2.0/files/fs/${fileId}/downloadurl${versionId ? `?versionId=${encodeURIComponent(versionId)}` : ""}`,
+          { headers: { Authorization: `Bearer ${token}` } });
+        if (!r.ok) { lastErr = `${host}: HTTP ${r.status}`; continue; }
+        const j = await r.json(); url = j.url || j.downloadUrl; if (url) break;
+      } catch (e) { lastErr = `${host}: ${errMsg(e)}`; }
+    }
+    if (!url) throw new Error("Downloadlink niet gekregen (" + lastErr + "). Kies het IFC-bestand zelf.");
+    $("ifcStatus").textContent = `downloaden: ${name}…`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`Download mislukt (HTTP ${resp.status}). Kies het IFC-bestand zelf.`);
+    await openIfc(new Uint8Array(await resp.arrayBuffer()), name);
+  } catch (e) {
+    $("ifcStatus").textContent = "nog niet geladen";
+    cornerError(errMsg(e));
+  }
+}
+
+function boxOf(b) {
+  const bb = b.boundingBox || b;
+  const v = (p) => [p.x, p.y, p.z];
+  return bb && bb.min && bb.max ? { min: v(bb.min), max: v(bb.max) } : null;
+}
+
+// Schaal en verschuiving tussen IFC (mm) en viewer, met controle van de restafwijking.
+function calibrate(pairs) {
+  const diag = (b) => Math.hypot(...LCS.sub(b.max, b.min));
+  const ratios = pairs.map(([ifc, tv]) => diag(ifc) / diag(tv)).filter((r) => Number.isFinite(r) && r > 0).sort((a, b) => a - b);
+  if (!ratios.length) throw new Error("Geen bruikbare afmetingen om IFC en viewer op elkaar af te stemmen.");
+  const s = Math.pow(10, Math.round(Math.log10(ratios[Math.floor(ratios.length / 2)])));
+  const off = [0, 0, 0];
+  pairs.forEach(([ifc, tv]) => { for (let i = 0; i < 3; i++) off[i] += (tv.min[i] * s - ifc.min[i] + tv.max[i] * s - ifc.max[i]) / 2; });
+  for (let i = 0; i < 3; i++) off[i] /= pairs.length;
+  let res = 0;
+  pairs.forEach(([ifc, tv]) => { for (let i = 0; i < 3; i++) res = Math.max(res, Math.abs(tv.min[i] * s - ifc.min[i] - off[i]), Math.abs(tv.max[i] * s - ifc.max[i] - off[i])); });
+  return { s, off, res, n: pairs.length };
+}
+
+async function placeCorners() {
+  cornerError("");
+  if (!S.axis || !S.ifc || !S.api) { updateButton(); return; }
+  const btn = $("btnCorners"); btn.disabled = true; btn.textContent = "Bezig…";
+  try {
+    await updateSelection();
+    const objs = []; let unmatched = 0;
+    for (const g of S.sel) {
+      const ext = await toExternalIds(g);
+      let boxes = [];
+      try { boxes = (await S.api.viewer.getObjectBoundingBoxes(g.modelId, g.objectRuntimeIds)) || []; } catch (e) { /* */ }
+      g.objectRuntimeIds.forEach((id, i) => {
+        const eid = S.ifc.index.byGuid.get(IfcGeom.guidToHex(ext[i]));
+        if (eid == null) { unmatched++; return; }
+        const bx = boxes.find((b) => b.id === id) || boxes[i];
+        objs.push({ eid, tv: bx ? boxOf(bx) : null });
+      });
+    }
+    if (!objs.length) throw new Error("Geen enkel geselecteerd object gevonden in het IFC-bestand. Is dit dezelfde modelversie als in de viewer?");
+
+    for (const o of objs) {
+      o.tris = IfcGeom.getTriangles(S.ifc.api, S.ifc.modelID, IfcGeom.expandIds(S.ifc.index, [o.eid]));
+      if (o.tris.length) o.ifcBox = IfcGeom.aabb(o.tris);
+    }
+    const geo = objs.filter((o) => o.tris.length);
+    if (!geo.length) throw new Error("De geselecteerde objecten hebben geen geometrie in het IFC-bestand.");
+    const pairs = geo.filter((o) => o.tv).map((o) => [o.ifcBox, o.tv]);
+    if (!pairs.length) throw new Error("De viewer gaf geen afmetingen terug; IFC en viewer kunnen niet op elkaar afgestemd worden.");
+    const cal = calibrate(pairs);
+
+    const seen = new Set(); let total = 0;
+    S.corners = geo.map((o) => {
+      const inf = S.ifc.index.info.get(o.eid) || {};
+      const pts = IfcGeom.cornerPoints(o.tris)
+        .map((p) => { const g = LCS.add(p, cal.off); return { g, l: LCS.toLocal(S.axis, g) }; })
+        .filter((q) => { const k = q.g.map((v) => Math.round(v / 0.5)).join(","); if (seen.has(k)) return false; seen.add(k); return true; })
+        .sort((a, b) => a.l[0] - b.l[0] || a.l[1] - b.l[1] || a.l[2] - b.l[2]);
+      total += pts.length;
+      return { name: inf.tag || inf.name || `#${o.eid}`, tag: inf.tag, objName: inf.name, type: inf.type, pts };
+    });
+
+    $("selDialog").hidden = true;
+    $("cornerResult").hidden = false;
+    $("cornerSummary").textContent = `${total} hoekpunten op ${S.corners.length} object(en), as "${S.axis.name}".` +
+      (total > MAX_LABELS ? ` Alleen de eerste ${MAX_LABELS} krijgen een label in de viewer; de lijst en de CSV bevatten alles.` : "");
+    $("calInfo").textContent = `Uitlijning IFC ↔ viewer: restafwijking ${fmt(cal.res, 1)} mm over ${cal.n} object(en).` +
+      (cal.res > CAL_TOL ? " Te groot: waarschijnlijk een andere modelversie. Vertrouw deze coördinaten niet." : "") +
+      (unmatched ? ` ${unmatched} object(en) niet gevonden in het IFC-bestand en overgeslagen.` : "");
+    $("calInfo").style.color = cal.res > CAL_TOL ? "var(--nok)" : "";
+    renderCorners();
+    await drawCornerLabels();
+  } catch (e) { cornerError(errMsg(e)); }
+  finally { btn.textContent = "Coördinaten plaatsen"; updateButton(); }
+}
+
+function renderCorners() {
+  $("cornerList").innerHTML = S.corners.map((c) => `<div class="card">
+    <div class="head"><span>${c.name}${c.objName && c.objName !== c.name ? ` · ${c.objName}` : ""}</span><span>${c.pts.length} punten</span></div>
+    <details><summary>Coördinaten</summary>
+    <table><tr><th></th><th>X</th><th>Y</th><th>Z</th></tr>
+    ${c.pts.map((q, i) => `<tr><td>${i + 1}</td><td class="dx">${fmt(q.l[0])}</td><td class="dy">${fmt(q.l[1])}</td><td class="dz">${fmt(q.l[2])}</td></tr>`).join("")}
+    </table></details></div>`).join("");
+}
+
+async function drawCornerLabels() {
+  if (!S.api) return;
+  await removeIds(S.cornerLabelIds); S.cornerLabelIds = [];
+  const items = [];
+  for (const c of S.corners) for (const q of c.pts) {
+    if (items.length >= MAX_LABELS) break;
+    items.push({ text: `x ${f0(q.l[0])} | y ${f0(q.l[1])} | z ${f0(q.l[2])}`, at: q.g, to: LCS.add(q.g, LCS.scale(S.axis.z, 150)) });
+  }
+  if (!items.length) return;
+  try { S.cornerLabelIds = await drawTexts(items); }
+  catch (e) { cornerError("Labels plaatsen mislukt: " + errMsg(e)); }
+}
+
+function exportCornerCsv() {
+  if (!S.corners.length) return;
+  const n = (v) => fmt(v, 1).replace(/\s/g, "");
+  const head = ["As", "Merk", "Naam", "Type", "Punt", "Lokaal X", "Lokaal Y", "Lokaal Z", "Globaal X", "Globaal Y", "Globaal Z"];
+  const lines = [];
+  S.corners.forEach((c) => c.pts.forEach((q, i) => lines.push([S.axis.name, c.tag || "", c.objName || "", c.type || "", i + 1, ...q.l.map(n), ...q.g.map(n)].join(";"))));
+  download(`hoekpunten_${S.axis.name.replace(/[^\w.-]+/g, "_")}.csv`, "\uFEFF" + [head.join(";"), ...lines].join("\r\n"), "text/csv");
+}
+
 /* ---------- Export / import ---------- */
 function download(name, text, type) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -590,6 +889,17 @@ $("btnPtCsv").addEventListener("click", exportPointCsv);
 $("btnPtLabels").addEventListener("click", drawPointLabels);
 $("btnPtLabelsOff").addEventListener("click", async () => { await removeIds(S.ptLabelIds); S.ptLabelIds = []; });
 $("btnMeasLabels").addEventListener("click", drawMeasLabels);
+document.querySelectorAll("input[name=pmode]").forEach((r) => r.addEventListener("change", (e) => setPointMode(e.target.value)));
+$("btnIfcProject").addEventListener("click", loadIfcFromProject);
+$("fileIfc").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; if (!f) return; cornerError("");
+  try { await openIfc(new Uint8Array(await f.arrayBuffer()), f.name); } catch (err) { cornerError("IFC inlezen mislukt: " + errMsg(err)); }
+});
+$("btnCorners").addEventListener("click", placeCorners);
+$("btnDlgCancel").addEventListener("click", () => setPointMode("3"));
+$("btnNewSel").addEventListener("click", openSelDialog);
+$("btnCornersOff").addEventListener("click", async () => { await removeIds(S.cornerLabelIds); S.cornerLabelIds = []; });
+$("btnCornersCsv").addEventListener("click", exportCornerCsv);
 $("btnMeasLabelsOff").addEventListener("click", async () => { await removeIds(S.measLabelIds); S.measLabelIds = []; });
 $("axisName").addEventListener("change", () => { if (S.axis) { S.axis.name = $("axisName").value.trim() || S.axis.name; renderAxis(); } });
 
