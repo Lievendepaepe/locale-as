@@ -234,6 +234,7 @@
       </div>
       <div class="row"><button class="primary" id="btnSnap">2. Momentopname nemen</button></div>
       <p class="meta" id="snapStatus">Nog geen momentopname.</p>
+      <details><summary>Camera-info (bij problemen)</summary><pre class="raw" id="camInfo">Nog geen gegevens.</pre></details>
       <div id="snapThumb"></div>
     </div>
     <div class="row">
@@ -814,6 +815,7 @@ async function placeCorners() {
       });
     }
     if (!objs.length) throw new Error("Geen enkel geselecteerd object gevonden in het IFC-bestand. Is dit dezelfde modelversie als in de viewer?");
+    S.cornerSel = S.sel.map((g) => ({ modelId: g.modelId, objectRuntimeIds: g.objectRuntimeIds.slice() }));
 
     for (const o of objs) {
       o.tris = IfcGeom.getTriangles(S.ifc.api, S.ifc.modelID, IfcGeom.expandIds(S.ifc.index, [o.eid]));
@@ -1119,23 +1121,63 @@ function quatFromBasis(x, y, z) {
   return { x: qx, y: qy, z: qz, w };
 }
 
+const qmul = (a, b) => ({
+  w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+  y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+  z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+});
+const qsame = (a, b) => Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) > 0.9999;
+const qok = (q) => q && [q.x, q.y, q.z, q.w].every(Number.isFinite);
+
+// Zoomt in op de objecten van stap 4 (of laat de camera staan als er geen zijn).
+async function fitToObjects() {
+  const sel = S.cornerSel && S.cornerSel.length ? S.cornerSel : null;
+  if (!sel) return false;
+  await S.api.viewer.setCamera({ modelObjectIds: sel.map((g) => ({ modelId: g.modelId, objectRuntimeIds: g.objectRuntimeIds })) }, { animationTime: 0 });
+  return true;
+}
+
+/*
+ * Camera loodrecht op het lokale XY-vlak, zonder aannames over het interne stelsel van de viewer:
+ * 1. Trimble-bovenaanzicht instellen en de camerarotatie ervan uitlezen (referentie: X rechts, Y boven, kijkend langs −Z).
+ * 2. De rotatie van de lokale as daarop laten volgen, in het eigen stelsel van de camera.
+ * 3. Inzoomen op de objecten van stap 4, zodat het model in beeld blijft.
+ */
 async function setViewCamera(preset) {
   if (!S.api || !S.axis) { snapStatus("Verbinding en lokale as nodig.", "err"); return; }
+  const info = [];
   try {
-    if (preset) { await S.api.viewer.setCamera("top", { animationTime: 0 }); }
-    else {
-      const e = sketchExtents(sketchInput());
-      const c = LCS.toGlobal(S.axis, [(e.minX + e.maxX) / 2, (e.minY + e.maxY) / 2, e.maxZ]);
-      const pos = LCS.add(c, LCS.scale(S.axis.z, 100000)); // 100 m boven het midden
-      await S.api.viewer.setCamera({
-        position: { x: pos[0] / 1000, y: pos[1] / 1000, z: pos[2] / 1000 },
-        quaternion: quatFromBasis(S.axis.x, S.axis.y, S.axis.z),
-        projectionType: "ortho",
-        orthoSize: Math.max(e.extY, e.extX * 0.6) * 1.2 / 1000
-      }, { animationTime: 0 });
+    await S.api.viewer.setCamera("top", { animationTime: 0 }); await sleep(400);
+    const top = await S.api.viewer.getCamera();
+    info.push("Bovenaanzicht Trimble: " + JSON.stringify(top));
+    if (preset) {
+      if (await fitToObjects()) { await sleep(300); await S.api.viewer.setCamera("top", { animationTime: 0 }); }
+      $("camInfo").textContent = info.join("\n\n");
+      snapStatus("Bovenaanzicht Trimble ingesteld. Controleer het beeld en neem dan de momentopname.");
+      return;
     }
-    snapStatus("Camera ingesteld. Controleer het beeld: zoom of verschuif gerust, maar draai niet. Neem dan de momentopname.");
-  } catch (err) { snapStatus("Camera instellen mislukt: " + errMsg(err), "err"); }
+    if (!qok(top && top.quaternion)) throw new Error("Trimble gaf geen camerarotatie terug. Gebruik 'bovenaanzicht Trimble'.");
+    const qn = qmul(top.quaternion, quatFromBasis(S.axis.x, S.axis.y, S.axis.z));
+    await S.api.viewer.setCamera({ position: top.position, quaternion: qn, projectionType: "ortho" }, { animationTime: 0 });
+    await sleep(400);
+    if (await fitToObjects()) {
+      await sleep(400);
+      const after = await S.api.viewer.getCamera();
+      info.push("Na inzoomen: " + JSON.stringify(after));
+      // Als inzoomen de richting veranderde: richting opnieuw opleggen op de nieuwe positie.
+      if (after && qok(after.quaternion) && !qsame(after.quaternion, qn)) {
+        await S.api.viewer.setCamera({ position: after.position, quaternion: qn, projectionType: "ortho" }, { animationTime: 0 });
+        info.push("Richting opnieuw opgelegd.");
+      }
+    } else info.push("Geen objecten uit stap 4: niet ingezoomd.");
+    info.push("Gevraagde rotatie: " + JSON.stringify(qn));
+    $("camInfo").textContent = info.join("\n\n");
+    snapStatus("Camera ingesteld. Controleer: lokale X naar rechts, Y naar boven. Zoom of verschuif gerust, maar draai niet. Neem dan de momentopname.");
+  } catch (err) {
+    $("camInfo").textContent = info.join("\n\n");
+    snapStatus("Camera instellen mislukt: " + errMsg(err), "err");
+  }
 }
 
 function loadImage(url) {
@@ -1220,6 +1262,7 @@ async function captureView() {
     $("snapThumb").innerHTML = `<img src="${url}" alt="Momentopname van de viewer" style="width:100%;border:1px solid var(--line)">`;
     if (!A) snapStatus("Momentopname genomen, maar de ijkkruisen waren niet zichtbaar in het beeld. Het aanzicht wordt niet op schaal geplaatst; de labels uit de viewer staan wel in beeld.", "err");
     else if (q.aniso > 0.02 || q.ortho > 0.02) snapStatus(`Momentopname genomen, maar het beeld is vervormd (${(Math.max(q.aniso, q.ortho) * 100).toFixed(1)} %). Staat de camera in perspectief of niet loodrecht? Zet de camera opnieuw loodrecht en probeer nog eens.`, "err");
+    else if (Math.abs(Math.atan2(A[3], A[0])) > 0.035 || q.mirror) snapStatus(`Momentopname geijkt, maar lokale X staat ${q.mirror ? "gespiegeld (je kijkt van onder)" : (Math.atan2(A[3], A[0]) * 180 / Math.PI).toFixed(0) + "° gedraaid"} in de viewer. Op het blad wordt dit rechtgezet${q.mirror ? ", maar het beeld is een onderaanzicht" : ""}.`, q.mirror ? "err" : "ok");
     else snapStatus(`Momentopname geijkt: ${q.pxPerMm >= 0.1 ? (q.pxPerMm * 1000).toFixed(0) + " px per m" : (1 / q.pxPerMm).toFixed(0) + " mm per px"}, vervorming ${(Math.max(q.aniso, q.ortho) * 100).toFixed(2)} %${q.mirror ? ", let op: onderaanzicht (gespiegeld)" : ""}.`, "ok");
   } catch (err) { snapStatus("Momentopname mislukt: " + errMsg(err), "err"); }
   finally { if (st) await restoreLabels(st); btn.disabled = false; }
