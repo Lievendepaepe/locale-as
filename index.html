@@ -797,18 +797,25 @@ function boxOf(b) {
   return bb && bb.min && bb.max ? { min: v(bb.min), max: v(bb.max) } : null;
 }
 
-// Schaal en verschuiving tussen IFC (mm) en viewer, met controle van de restafwijking.
+// Schaal en verschuiving tussen IFC (mm) en viewer. Robuust: mediaan per as, zodat één afwijkend object
+// de andere niet meetrekt. Geeft per object de afwijking per as en kant terug.
 function calibrate(pairs) {
   const diag = (b) => Math.hypot(...LCS.sub(b.max, b.min));
-  const ratios = pairs.map(([ifc, tv]) => diag(ifc) / diag(tv)).filter((r) => Number.isFinite(r) && r > 0).sort((a, b) => a - b);
+  const med = (a) => { const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const ratios = pairs.map(([ifc, tv]) => diag(ifc) / diag(tv)).filter((r) => Number.isFinite(r) && r > 0);
   if (!ratios.length) throw new Error("Geen bruikbare afmetingen om IFC en viewer op elkaar af te stemmen.");
-  const s = Math.pow(10, Math.round(Math.log10(ratios[Math.floor(ratios.length / 2)])));
-  const off = [0, 0, 0];
-  pairs.forEach(([ifc, tv]) => { for (let i = 0; i < 3; i++) off[i] += (tv.min[i] * s - ifc.min[i] + tv.max[i] * s - ifc.max[i]) / 2; });
-  for (let i = 0; i < 3; i++) off[i] /= pairs.length;
-  let res = 0;
-  pairs.forEach(([ifc, tv]) => { for (let i = 0; i < 3; i++) res = Math.max(res, Math.abs(tv.min[i] * s - ifc.min[i] - off[i]), Math.abs(tv.max[i] * s - ifc.max[i] - off[i])); });
-  return { s, off, res, n: pairs.length };
+  const s = Math.pow(10, Math.round(Math.log10(med(ratios))));
+  const off = [0, 1, 2].map((i) => med([].concat(...pairs.map(([ifc, tv]) => [tv.min[i] * s - ifc.min[i], tv.max[i] * s - ifc.max[i]]))));
+  const per = pairs.map(([ifc, tv]) => {
+    const d = [];
+    ["X", "Y", "Z"].forEach((ax, i) => {
+      d.push({ side: ax + "-min", v: ifc.min[i] + off[i] - tv.min[i] * s });
+      d.push({ side: ax + "-max", v: ifc.max[i] + off[i] - tv.max[i] * s });
+    });
+    const worst = d.reduce((a, b) => (Math.abs(b.v) > Math.abs(a.v) ? b : a));
+    return { res: Math.abs(worst.v), worst };
+  });
+  return { s, off, per, res: Math.max(...per.map((p) => p.res)), n: pairs.length };
 }
 
 async function placeCorners() {
@@ -838,9 +845,11 @@ async function placeCorners() {
     }
     const geo = objs.filter((o) => o.tris.length);
     if (!geo.length) throw new Error("De geselecteerde objecten hebben geen geometrie in het IFC-bestand.");
-    const pairs = geo.filter((o) => o.tv).map((o) => [o.ifcBox, o.tv]);
+    const withBox = geo.filter((o) => o.tv);
+    const pairs = withBox.map((o) => [o.ifcBox, o.tv]);
     if (!pairs.length) throw new Error("De viewer gaf geen afmetingen terug; IFC en viewer kunnen niet op elkaar afgestemd worden.");
     const cal = calibrate(pairs);
+    withBox.forEach((o, i) => { o.cal = cal.per[i]; });
 
     const seen = new Set(); let total = 0;
     S.corners = geo.map((o) => {
@@ -860,17 +869,23 @@ async function placeCorners() {
         vpts.push({ u: l[0], v: l[1], p: g });
       }
       const outlineG = IfcGeom.simplify(IfcGeom.hull2d(vpts), 1, 1).map((q) => q.p);
-      return { name: inf.tag || inf.name || `#${o.eid}`, tag: inf.tag, objName: inf.name, type: inf.type, pts, outlineG };
+      return { name: inf.tag || inf.name || `#${o.eid}`, tag: inf.tag, objName: inf.name, type: inf.type, pts, outlineG, cal: o.cal || null };
     });
 
     $("selDialog").hidden = true;
     $("cornerResult").hidden = false;
     $("cornerSummary").textContent = `${total} hoekpunten op ${S.corners.length} object(en), as "${S.axis.name}".` +
       (total > MAX_LABELS ? ` Alleen de eerste ${MAX_LABELS} krijgen een label in de viewer; de lijst en de CSV bevatten alles.` : "");
-    $("calInfo").textContent = `Uitlijning IFC ↔ viewer: restafwijking ${fmt(cal.res, 1)} mm over ${cal.n} object(en).` +
-      (cal.res > CAL_TOL ? " Te groot: waarschijnlijk een andere modelversie. Vertrouw deze coördinaten niet." : "") +
-      (unmatched ? ` ${unmatched} object(en) niet gevonden in het IFC-bestand en overgeslagen.` : "");
-    $("calInfo").style.color = cal.res > CAL_TOL ? "var(--nok)" : "";
+    const bad = S.corners.filter((c) => c.cal && c.cal.res > CAL_TOL);
+    const dir = (w) => `${w.side} ${w.v >= 0 ? "+" : ""}${fmt(w.v, 1)} mm`;
+    $("calInfo").textContent = !bad.length
+      ? `Uitlijning IFC ↔ viewer: restafwijking ${fmt(cal.res, 1)} mm over ${cal.n} object(en).`
+      : `Uitlijning IFC ↔ viewer: ${cal.n - bad.length} van ${cal.n} object(en) in orde. Afwijkend: ` +
+        bad.map((c) => `${c.name} (${dir(c.cal.worst)})`).join(", ") +
+        ". Vertrouw de hoekpunten van die object(en) niet; controleer ze met een puntmeting (stap 3)." +
+        (bad.length === cal.n ? " Alle objecten wijken af: waarschijnlijk een andere modelversie." : "");
+    if (unmatched) $("calInfo").textContent += ` ${unmatched} object(en) niet gevonden in het IFC-bestand en overgeslagen.`;
+    $("calInfo").style.color = bad.length ? "var(--nok)" : "";
     renderCorners();
     await drawCornerLabels();
   } catch (e) { cornerError(errMsg(e)); }
@@ -879,7 +894,7 @@ async function placeCorners() {
 
 function renderCorners() {
   $("cornerList").innerHTML = S.corners.map((c) => `<div class="card">
-    <div class="head"><span>${c.name}${c.objName && c.objName !== c.name ? ` · ${c.objName}` : ""}</span><span>${c.pts.length} punten</span></div>
+    <div class="head"><span>${c.name}${c.objName && c.objName !== c.name ? ` · ${c.objName}` : ""}</span><span>${c.pts.length} punten${c.cal ? ` · uitlijning ${c.cal.res > CAL_TOL ? `<b style="color:var(--nok)">${fmt(c.cal.res, 1)} mm – niet vertrouwen</b>` : fmt(c.cal.res, 1) + " mm"}` : ""}</span></div>
     <details><summary>Coördinaten</summary>
     <table><tr><th></th><th>X</th><th>Y</th><th>Z</th></tr>
     ${c.pts.map((q, i) => `<tr><td>${i + 1}</td><td class="dx">${fmt(q.l[0])}</td><td class="dy">${fmt(q.l[1])}</td><td class="dz">${fmt(q.l[2])}</td></tr>`).join("")}
