@@ -1214,18 +1214,27 @@ function loadImage(url) {
   return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error("Beeld kan niet gelezen worden.")); im.src = url; });
 }
 
-// Zwaartepunt van de magenta pixels (het ijkkruis) in de momentopname.
-async function findMarker(url) {
+async function imageData(url) {
   const im = await loadImage(url), cv = document.createElement("canvas");
   cv.width = im.naturalWidth; cv.height = im.naturalHeight;
   const ctx = cv.getContext("2d"); ctx.drawImage(im, 0, 0);
-  const dt = ctx.getImageData(0, 0, cv.width, cv.height).data;
+  return { w: cv.width, h: cv.height, d: ctx.getImageData(0, 0, cv.width, cv.height).data };
+}
+
+// Zwaartepunt van het ijkkruis: pixels die magenta zijn én er in de referentieopname nog niet waren.
+// Zo tellen de (ook magenta) metingen en labels van Trimble niet mee.
+async function findMarker(url, ref) {
+  const cur = await imageData(url);
+  if (!ref || ref.w !== cur.w || ref.h !== cur.h) return null;
+  const a = cur.d, b = ref.d;
   let sx = 0, sy = 0, n = 0;
-  for (let y = 0; y < cv.height; y++) for (let x = 0; x < cv.width; x++) {
-    const i = (y * cv.width + x) * 4;
-    if (dt[i] > 190 && dt[i + 1] < 90 && dt[i + 2] > 190) { sx += x; sy += y; n++; }
+  for (let y = 0; y < cur.h; y++) for (let x = 0; x < cur.w; x++) {
+    const i = (y * cur.w + x) * 4;
+    const magenta = a[i] > 190 && a[i + 1] < 90 && a[i + 2] > 190;
+    const changed = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 90;
+    if (magenta && changed) { sx += x; sy += y; n++; }
   }
-  return n >= 4 ? { u: sx / n, v: sy / n, n, w: cv.width, h: cv.height } : null;
+  return n >= 4 ? { u: sx / n, v: sy / n, n, w: cur.w, h: cur.h } : null;
 }
 
 // Affiene transformatie lokaal (x,y) → pixel (u,v) uit drie puntparen.
@@ -1263,6 +1272,9 @@ async function captureView() {
     const z = e.maxZ + 200, arm = Math.max(e.extX, e.extY) * 0.015;
     const locs = [[e.minX, e.minY], [e.maxX, e.minY], [e.minX, e.maxY]];
     st = await hideLabels();
+    await sleep(600);
+    snapStatus("IJken: referentiebeeld…");
+    const ref = await imageData(await S.api.viewer.getSnapshot());
     const found = [];
     for (let i = 0; i < 3; i++) {
       snapStatus(`IJken: punt ${i + 1} van 3…`);
@@ -1275,7 +1287,7 @@ async function captureView() {
       await sleep(600);
       const url = await S.api.viewer.getSnapshot();
       await removeIds((ms || []).map((m) => m.id).filter((id) => id != null));
-      found.push(await findMarker(url));
+      found.push(await findMarker(url, ref));
     }
     await sleep(400);
     let A = null, q = null;
@@ -1283,15 +1295,18 @@ async function captureView() {
       A = affine3(locs, found);
       const sx = Math.hypot(A[0], A[3]), sy = Math.hypot(A[1], A[4]);
       q = { aniso: Math.abs(sx - sy) / Math.max(sx, sy), ortho: Math.abs(A[0] * A[1] + A[3] * A[4]) / (sx * sy), mirror: A[0] * A[4] - A[1] * A[3] > 0, pxPerMm: (sx + sy) / 2 };
+      q.found = found.map((f) => `(${f.u.toFixed(1)}, ${f.v.toFixed(1)}) ${f.n} px`).join(" · ");
     } else {
       await restoreLabels(st); st = null; await sleep(600); // zonder ijking: labels uit de viewer mee in beeld
     }
     const url = await S.api.viewer.getSnapshot();
     const im = await loadImage(url);
-    S.snap = { url, w: im.naturalWidth, h: im.naturalHeight, A, q, axisKey: axisKey() };
+    const bad = A && (q.aniso > 0.02 || q.ortho > 0.02);
+    S.snap = { url, w: im.naturalWidth, h: im.naturalHeight, A: bad ? null : A, q, axisKey: axisKey() };
+    $("camInfo").textContent += `\n\nIJking: ${A ? `kruisjes ${q.found}; vervorming ${(Math.max(q.aniso, q.ortho) * 100).toFixed(2)} %${bad ? " → NIET gebruikt" : ""}` : "kruisjes niet gevonden: " + found.map((f) => (f ? "ok" : "–")).join(" ")}`;
     $("snapThumb").innerHTML = `<img src="${url}" alt="Momentopname van de viewer" style="width:100%;border:1px solid var(--line)">`;
     if (!A) snapStatus("Momentopname genomen, maar de ijkkruisen waren niet zichtbaar in het beeld. Het aanzicht wordt niet op schaal geplaatst; de labels uit de viewer staan wel in beeld.", "err");
-    else if (q.aniso > 0.02 || q.ortho > 0.02) snapStatus(`Momentopname genomen, maar het beeld is vervormd (${(Math.max(q.aniso, q.ortho) * 100).toFixed(1)} %). Staat de camera in perspectief of niet loodrecht? Zet de camera opnieuw loodrecht en probeer nog eens.`, "err");
+    else if (bad) snapStatus(`IJking afgekeurd: het beeld lijkt vervormd (${(Math.max(q.aniso, q.ortho) * 100).toFixed(1)} %). Het aanzicht komt op het blad als "niet op schaal – enkel oriëntatie". Zet de camera opnieuw loodrecht en probeer nog eens.`, "err");
     else if (Math.abs(Math.atan2(A[3], A[0])) > 0.035 || q.mirror) snapStatus(`Momentopname geijkt, maar lokale X staat ${q.mirror ? "gespiegeld (je kijkt van onder)" : (Math.atan2(A[3], A[0]) * 180 / Math.PI).toFixed(0) + "° gedraaid"} in de viewer. Op het blad wordt dit rechtgezet${q.mirror ? ", maar het beeld is een onderaanzicht" : ""}.`, q.mirror ? "err" : "ok");
     else snapStatus(`Momentopname geijkt: ${q.pxPerMm >= 0.1 ? (q.pxPerMm * 1000).toFixed(0) + " px per m" : (1 / q.pxPerMm).toFixed(0) + " mm per px"}, vervorming ${(Math.max(q.aniso, q.ortho) * 100).toFixed(2)} %${q.mirror ? ", let op: onderaanzicht (gespiegeld)" : ""}.`, "ok");
   } catch (err) { snapStatus("Momentopname mislukt: " + errMsg(err), "err"); }
