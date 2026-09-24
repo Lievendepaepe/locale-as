@@ -1138,42 +1138,72 @@ async function fitToObjects() {
   return true;
 }
 
+const vnorm = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return v.map((c) => c / l); };
+const V3 = (p) => [p.x, p.y, p.z];
+const lookDir = (c) => (c && c.lookAt && c.position ? vnorm(LCS.sub(V3(c.lookAt), V3(c.position))) : null);
+
+// Wacht tot Trimble een zuiver bovenaanzicht toont (kijkrichting langs een wereldas) en de camera stilstaat.
+async function waitTopCamera() {
+  let prev = null;
+  for (let i = 0; i < 20; i++) {
+    await sleep(250);
+    const c = await S.api.viewer.getCamera(), d = lookDir(c);
+    const aligned = d && Math.max(...d.map(Math.abs)) > 0.999;
+    const still = prev && c.position && prev.position && LCS.len(LCS.sub(V3(c.position), V3(prev.position))) < 1e-6;
+    if (aligned && still) return c;
+    prev = c;
+  }
+  throw new Error("Trimble toonde geen zuiver bovenaanzicht binnen 5 seconden.");
+}
+
 /*
- * Camera loodrecht op het lokale XY-vlak, zonder aannames over het interne stelsel van de viewer:
- * 1. Trimble-bovenaanzicht instellen en de camerarotatie ervan uitlezen (referentie: X rechts, Y boven, kijkend langs −Z).
- * 2. De rotatie van de lokale as daarop laten volgen, in het eigen stelsel van de camera.
- * 3. Inzoomen op de objecten van stap 4, zodat het model in beeld blijft.
+ * Camera loodrecht op het lokale XY-vlak.
+ * Vastgesteld in Trimble: de camera kijkt langs haar eigen +Z, met +Y naar boven (haar X wijst dus naar links).
+ * 1. Trimble-bovenaanzicht instellen en wachten tot het stilstaat.
+ *    Daaruit volgt hoe de modelassen in de viewerwereld liggen: modelZ = −kijkrichting, modelY = bovenrichting.
+ * 2. Gewenste camera in die wereld: kijkrichting = −lokale Z, boven = lokale Y.
+ * 3. Inzoomen op de objecten van stap 4 en de richting controleren.
  */
 async function setViewCamera(preset) {
   if (!S.api || !S.axis) { snapStatus("Verbinding en lokale as nodig.", "err"); return; }
   const info = [];
   try {
-    await S.api.viewer.setCamera("top", { animationTime: 0 }); await sleep(400);
-    const top = await S.api.viewer.getCamera();
-    info.push("Bovenaanzicht Trimble: " + JSON.stringify(top));
+    snapStatus("Bovenaanzicht instellen…");
+    await S.api.viewer.setCamera("top", { animationTime: 0 });
+    const top = await waitTopCamera();
+    info.push("Bovenaanzicht Trimble (stil): " + JSON.stringify(top));
     if (preset) {
-      if (await fitToObjects()) { await sleep(300); await S.api.viewer.setCamera("top", { animationTime: 0 }); }
+      if (await fitToObjects()) { await sleep(400); await S.api.viewer.setCamera("top", { animationTime: 0 }); await waitTopCamera(); }
       $("camInfo").textContent = info.join("\n\n");
       snapStatus("Bovenaanzicht Trimble ingesteld. Controleer het beeld en neem dan de momentopname.");
       return;
     }
-    if (!qok(top && top.quaternion)) throw new Error("Trimble gaf geen camerarotatie terug. Gebruik 'bovenaanzicht Trimble'.");
-    const qn = qmul(top.quaternion, quatFromBasis(S.axis.x, S.axis.y, S.axis.z));
+    if (!top.upDirection) throw new Error("Trimble gaf geen bovenrichting terug. Gebruik 'bovenaanzicht Trimble'.");
+    // Modelassen uitgedrukt in de viewerwereld
+    const wZ = LCS.scale(lookDir(top), -1), wY = vnorm(V3(top.upDirection)), wX = LCS.cross(wY, wZ);
+    const W = (v) => LCS.add(LCS.add(LCS.scale(wX, v[0]), LCS.scale(wY, v[1])), LCS.scale(wZ, v[2]));
+    // Gewenste camera: kijkt langs −lokale Z, boven = lokale Y; camera-X = boven × voorwaarts (wijst naar links)
+    const fwd = vnorm(W(LCS.scale(S.axis.z, -1))), up = vnorm(W(S.axis.y)), cx = LCS.cross(up, fwd);
+    const qn = quatFromBasis(cx, up, fwd);
+    info.push("Modelassen in viewer: X " + JSON.stringify(wX.map((c) => +c.toFixed(4))) + " Y " + JSON.stringify(wY.map((c) => +c.toFixed(4))) + " Z " + JSON.stringify(wZ.map((c) => +c.toFixed(4))));
+    snapStatus("Camera draaien…");
     await S.api.viewer.setCamera({ position: top.position, quaternion: qn, projectionType: "ortho" }, { animationTime: 0 });
-    await sleep(400);
+    await sleep(500);
     if (await fitToObjects()) {
-      await sleep(400);
+      await sleep(600);
       const after = await S.api.viewer.getCamera();
-      info.push("Na inzoomen: " + JSON.stringify(after));
-      // Als inzoomen de richting veranderde: richting opnieuw opleggen op de nieuwe positie.
       if (after && qok(after.quaternion) && !qsame(after.quaternion, qn)) {
         await S.api.viewer.setCamera({ position: after.position, quaternion: qn, projectionType: "ortho" }, { animationTime: 0 });
-        info.push("Richting opnieuw opgelegd.");
+        info.push("Richting na inzoomen opnieuw opgelegd.");
       }
     } else info.push("Geen objecten uit stap 4: niet ingezoomd.");
-    info.push("Gevraagde rotatie: " + JSON.stringify(qn));
+    await sleep(500);
+    const fin = await S.api.viewer.getCamera(), fd = lookDir(fin);
+    const err = fd ? Math.acos(Math.min(1, Math.max(-1, LCS.dot(fd, fwd)))) * 180 / Math.PI : null;
+    info.push("Eindcamera: " + JSON.stringify(fin), "Afwijking kijkrichting: " + (err == null ? "onbekend" : err.toFixed(2) + "°"));
     $("camInfo").textContent = info.join("\n\n");
-    snapStatus("Camera ingesteld. Controleer: lokale X naar rechts, Y naar boven. Zoom of verschuif gerust, maar draai niet. Neem dan de momentopname.");
+    if (err != null && err > 1) snapStatus(`Camera staat ${err.toFixed(1)}° naast loodrecht. Probeer opnieuw of gebruik 'bovenaanzicht Trimble'.`, "err");
+    else snapStatus("Camera loodrecht op XY: lokale X naar rechts, Y naar boven. Zoom of verschuif gerust, maar draai niet. Neem dan de momentopname.", "ok");
   } catch (err) {
     $("camInfo").textContent = info.join("\n\n");
     snapStatus("Camera instellen mislukt: " + errMsg(err), "err");
