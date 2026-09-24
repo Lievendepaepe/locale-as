@@ -232,7 +232,9 @@
         <button id="btnCam">1. Camera loodrecht op XY</button>
         <button id="btnCamTop" title="Trimble-standaard: van boven langs de globale Z">of: bovenaanzicht Trimble</button>
       </div>
-      <div class="row"><button class="primary" id="btnSnap">2. Momentopname nemen</button></div>
+      <div class="row"><label><input type="checkbox" id="snapHideTc" checked> Metingen van Trimble (roze labels) verbergen in de opname</label></div>
+      <div class="row"><button class="primary" id="btnSnap">2. Momentopname nemen</button>
+        <button id="btnTcRestore" hidden>Metingen terugzetten</button></div>
       <p class="meta" id="snapStatus">Nog geen momentopname.</p>
       <details><summary>Camera-info (bij problemen)</summary><pre class="raw" id="camInfo">Nog geen gegevens.</pre></details>
       <div id="snapThumb"></div>
@@ -1263,12 +1265,52 @@ async function restoreLabels(st) {
   if (st.co) await drawCornerLabels();
 }
 
+// Trimble-metingen (roze labels met globale coördinaten) tijdelijk verbergen tijdens de momentopname.
+const TC_KINDS = [
+  ["measurement", "getMeasurementMarkups", "addMeasurementMarkups"],
+  ["point", "getSinglePointMarkups", "addSinglePointMarkups"],
+  ["angle", "getAngleMarkups", "addAngleMarkups"],
+  ["slope", "getSlopeMeasurementMarkups", "addSlopeMeasurementMarkups"]
+];
+async function hideTrimbleMarkups() {
+  const saved = [];
+  for (const [kind, get, add] of TC_KINDS) {
+    if (typeof S.api.markup[get] !== "function") continue;
+    let list = [];
+    try { list = (await S.api.markup[get]()) || []; } catch (e) { continue; }
+    if (list.length) saved.push({ kind, add, list: JSON.parse(JSON.stringify(list)) });
+  }
+  const ids = [].concat(...saved.map((s) => s.list.map((m) => m.id))).filter((id) => id != null);
+  S.markupBackup = saved;
+  if (ids.length) await S.api.markup.removeMarkups(ids);
+  return saved;
+}
+async function restoreTrimbleMarkups(saved) {
+  const map = new Map(); // oud id → nieuw id
+  for (const s of saved) {
+    const res = (await S.api.markup[s.add](s.list)) || [];
+    s.list.forEach((m, i) => { if (res[i] && res[i].id != null && m.id != null) map.set(m.id, res[i].id); });
+  }
+  S.markupBackup = null;
+  // Ingevulde gegevens van stap 1–3 meeverhuizen naar de nieuwe nummers
+  const mv = (obj, key) => { const out = {}; Object.entries(obj).forEach(([k, v]) => { out[key(k)] = v; }); return out; };
+  S.checks = mv(S.checks, (k) => String(map.get(Number(k)) ?? k));
+  S.pchecks = mv(S.pchecks, (k) => { const t = k[0], id = Number(k.slice(1)); return t + (map.get(id) ?? id); });
+  if (S.axis && S.axis.sourceIds) S.axis.sourceIds = S.axis.sourceIds.map((id) => map.get(id) ?? id);
+  const selA = $("selA").value, selB = $("selB").value, tch = $("selA").dataset.touched;
+  await refreshMeasurements();
+  const re = (v) => (v !== "" && map.has(Number(v)) ? String(map.get(Number(v))) : v);
+  $("selA").value = re(selA); $("selB").value = re(selB); if (tch) $("selA").dataset.touched = re(tch);
+  return map;
+}
+
 async function captureView() {
   if (!S.api || !S.axis) { snapStatus("Verbinding en lokale as nodig.", "err"); return; }
   const btn = $("btnSnap"); btn.disabled = true;
-  let st = null;
+  let st = null, tcSaved = null;
   try {
     const e = sketchExtents(sketchInput());
+    if ($("snapHideTc").checked) { snapStatus("Metingen van Trimble tijdelijk verbergen…"); tcSaved = await hideTrimbleMarkups(); }
     const z = e.maxZ + 200, arm = Math.max(e.extX, e.extY) * 0.015;
     const locs = [[e.minX, e.minY], [e.maxX, e.minY], [e.minX, e.maxY]];
     st = await hideLabels();
@@ -1310,7 +1352,14 @@ async function captureView() {
     else if (Math.abs(Math.atan2(A[3], A[0])) > 0.035 || q.mirror) snapStatus(`Momentopname geijkt, maar lokale X staat ${q.mirror ? "gespiegeld (je kijkt van onder)" : (Math.atan2(A[3], A[0]) * 180 / Math.PI).toFixed(0) + "° gedraaid"} in de viewer. Op het blad wordt dit rechtgezet${q.mirror ? ", maar het beeld is een onderaanzicht" : ""}.`, q.mirror ? "err" : "ok");
     else snapStatus(`Momentopname geijkt: ${q.pxPerMm >= 0.1 ? (q.pxPerMm * 1000).toFixed(0) + " px per m" : (1 / q.pxPerMm).toFixed(0) + " mm per px"}, vervorming ${(Math.max(q.aniso, q.ortho) * 100).toFixed(2)} %${q.mirror ? ", let op: onderaanzicht (gespiegeld)" : ""}.`, "ok");
   } catch (err) { snapStatus("Momentopname mislukt: " + errMsg(err), "err"); }
-  finally { if (st) await restoreLabels(st); btn.disabled = false; }
+  finally {
+    if (st) await restoreLabels(st);
+    if (tcSaved && tcSaved.length) {
+      try { await restoreTrimbleMarkups(tcSaved); $("btnTcRestore").hidden = true; }
+      catch (e) { $("btnTcRestore").hidden = false; snapStatus("Let op: de metingen van Trimble konden niet teruggezet worden. Klik op 'Metingen terugzetten'.", "err"); }
+    }
+    btn.disabled = false;
+  }
 }
 
 // Plaatst de momentopname op het blad. Met ijking: exact uitgelijnd op de lokale assen en de schaal van de schets.
@@ -1427,6 +1476,11 @@ $("skDoc").addEventListener("change", () => { $("snapBox").hidden = $("skDoc").v
 $("btnCam").addEventListener("click", () => setViewCamera(false));
 $("btnCamTop").addEventListener("click", () => setViewCamera(true));
 $("btnSnap").addEventListener("click", captureView);
+$("btnTcRestore").addEventListener("click", async () => {
+  if (!S.markupBackup) { $("btnTcRestore").hidden = true; return; }
+  try { await restoreTrimbleMarkups(S.markupBackup); $("btnTcRestore").hidden = true; snapStatus("Metingen van Trimble teruggezet.", "ok"); }
+  catch (e) { snapStatus("Terugzetten mislukt: " + errMsg(e), "err"); }
+});
 $("btnSkPrint").addEventListener("click", printSketch);
 $("btnSkSvg").addEventListener("click", downloadSketchSvg);
 $("btnMeasLabelsOff").addEventListener("click", async () => { await removeIds(S.measLabelIds); S.measLabelIds = []; });
