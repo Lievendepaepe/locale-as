@@ -264,6 +264,19 @@
     <p class="meta" id="skInfo"></p>
     <div id="skPreview"></div>
   </section>
+
+  <section id="sec6">
+    <h2><span class="n">6</span>Bewaren</h2>
+    <p class="muted">Bewaar de lokale as en alle meetpunten (stap 2, 3 en 4) met je ingevulde waarden in één bestand. Zet dat bestand in het Trimble-project, dan kan iedereen het later terugladen.</p>
+    <div class="row">
+      <button class="primary" id="btnSessSave">Alles bewaren</button>
+    </div>
+    <div class="row">
+      <label class="muted">Sessie laden: <input type="file" id="fileSess" accept="application/json,.json"></label>
+    </div>
+    <div class="row"><label><input type="checkbox" id="sessRecreate" checked> Meetpunten bij het laden opnieuw in Trimble plaatsen</label></div>
+    <p class="meta" id="sessStatus"></p>
+  </section>
 </main>
 
 <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
@@ -1395,6 +1408,92 @@ function downloadSketchSvg() {
     download(`schets_${S.axis.name.replace(/[^\w.-]+/g, "_")}_blad${i + 1}.svg`, '<?xml version="1.0" encoding="UTF-8"?>\n' + sv, "image/svg+xml"), i * 400));
 }
 
+/* ---------- Stap 6: sessie bewaren en laden ---------- */
+function sessStatus(msg, kind) { const el = $("sessStatus"); el.textContent = msg; el.style.color = kind === "err" ? "var(--nok)" : kind === "ok" ? "var(--ok)" : ""; }
+
+function saveSession() {
+  if (!S.axis) { sessStatus("Leg eerst een lokale as vast (stap 1).", "err"); return; }
+  const { O, x, y, z, base, offset, mode, name, created } = S.axis;
+  const sess = {
+    type: "lokale-as-sessie", version: 1, units: "mm", saved: new Date().toISOString(),
+    model: S.ifc ? S.ifc.name : null,
+    axis: { name, created, mode, base, offset, O, x, y, z },
+    tolerance: parseFloat($("tol").value) || 0,
+    sketch: { project: $("skProject").value, part: $("skPart").value, paper: $("skPaper").value, scale: $("skScale").value },
+    // Stap 2: afstandsmetingen (zonder de metingen die de as bepaalden)
+    step2: S.meas.filter((m) => !(S.axis.sourceIds || []).includes(m.id)).map((m) => ({
+      start: pickToVec(m.start), end: pickToVec(m.end), check: S.checks[m.id] || null })),
+    // Stap 3: punten met naam en theoretische waarden
+    step3: S.points.map((p) => ({ g: p.g, src: p.src, check: S.pchecks[p.key] || null })),
+    // Stap 4: hoekpunten en omtrek per plaat
+    step4: S.corners.map((c) => ({ name: c.name, tag: c.tag, objName: c.objName, type: c.type, pts: c.pts.map((q) => q.g), outline: c.outlineG || [] }))
+  };
+  const fname = `sessie_${name.replace(/[^\w.-]+/g, "_")}_${new Date().toISOString().slice(0, 10)}.json`;
+  download(fname, JSON.stringify(sess, null, 1), "application/json");
+  sessStatus(`Bewaard: ${fname} · as + ${sess.step2.length} metingen + ${sess.step3.length} punten + ${sess.step4.reduce((a, c) => a + c.pts.length, 0)} hoekpunten.`, "ok");
+}
+
+async function loadSession(file) {
+  try {
+    const j = JSON.parse(await file.text());
+    if (j.type !== "lokale-as-sessie" || j.units !== "mm" || !j.axis) throw new Error("Dit is geen sessiebestand van deze extensie.");
+    const a = j.axis;
+    const axis = { O: a.O, x: a.x, y: a.y, z: a.z, base: a.base, offset: a.offset ?? null, mode: a.mode, name: a.name, created: a.created, sourceIds: [] };
+    if (!LCS.check(axis)) throw new Error("De as in het bestand is niet orthonormaal.");
+    S.axis = axis; $("axisName").value = a.name || "";
+    $("tol").value = j.tolerance ?? $("tol").value;
+    if (j.sketch) { $("skProject").value = j.sketch.project || ""; $("skPart").value = j.sketch.part || ""; if (j.sketch.paper) $("skPaper").value = j.sketch.paper; if (j.sketch.scale) $("skScale").value = j.sketch.scale; }
+
+    // Stap 4 rechtstreeks herstellen (geen IFC nodig)
+    S.corners = (j.step4 || []).map((c) => ({ name: c.name, tag: c.tag, objName: c.objName, type: c.type,
+      pts: c.pts.map((g) => ({ g, l: LCS.toLocal(S.axis, g) })), outlineG: c.outline || [] }));
+    S.cornerSel = null;
+
+    // Stap 2 en 3: metingen opnieuw in Trimble plaatsen (bestaande identieke metingen worden hergebruikt)
+    let made = 0, reused = 0;
+    if ($("sessRecreate").checked && S.api) {
+      await refreshMeasurements();
+      const near = (p, q) => LCS.len(LCS.sub(p, q)) < 0.5;
+      const pts3 = j.step3 || [], meas2 = j.step2 || [];
+      const newPts = [], ptIdx = [];
+      pts3.forEach((p, i) => {
+        const hit = S.points.find((q) => near(q.g, p.g));
+        if (hit) { S.pchecks[hit.key] = p.check || S.pchecks[hit.key]; reused++; }
+        else { newPts.push({ start: vecToPick(p.g) }); ptIdx.push(i); }
+      });
+      if (newPts.length) {
+        const res = (await S.api.markup.addSinglePointMarkups(newPts)) || [];
+        res.forEach((m, k) => { const p = pts3[ptIdx[k]]; if (m && m.id != null && p.check) S.pchecks["P" + m.id] = p.check; });
+        made += res.length;
+      }
+      const newMs = [], msIdx = [];
+      meas2.forEach((m, i) => {
+        const hit = S.meas.find((q) => near(pickToVec(q.start), m.start) && near(pickToVec(q.end), m.end));
+        if (hit) { if (m.check) S.checks[hit.id] = m.check; reused++; }
+        else { const s = vecToPick(m.start), e = vecToPick(m.end); newMs.push({ start: s, end: e, mainLineStart: s, mainLineEnd: e }); msIdx.push(i); }
+      });
+      if (newMs.length) {
+        const res = (await S.api.markup.addMeasurementMarkups(newMs)) || [];
+        res.forEach((mk, k) => { const m = meas2[msIdx[k]]; if (mk && mk.id != null && m.check) S.checks[mk.id] = m.check; });
+        made += res.length;
+      }
+      await refreshMeasurements();
+    }
+
+    renderAxis(); renderMeasurements(); renderPoints();
+    if (S.corners.length) {
+      renderCorners();
+      $("cornerResult").hidden = false;
+      $("cornerSummary").textContent = `${S.corners.reduce((n, c) => n + c.pts.length, 0)} hoekpunten op ${S.corners.length} object(en), geladen uit sessie "${a.name}".`;
+      $("calInfo").textContent = j.model ? `Oorspronkelijk model: ${j.model}.` : "";
+    }
+    if (S.api) { await drawAxes(); if (S.corners.length) await drawCornerLabels(); }
+    sessStatus(`Geladen: as "${a.name}" (bewaard ${new Date(j.saved).toLocaleString("nl-BE")})` +
+      (S.api && $("sessRecreate").checked ? ` · ${made} metingen opnieuw geplaatst, ${reused} bestonden al.` : ".") +
+      (j.model && S.ifc && S.ifc.name !== j.model ? ` Let op: bewaard met model ${j.model}, nu geladen: ${S.ifc.name}.` : ""), "ok");
+  } catch (e) { sessStatus("Laden mislukt: " + errMsg(e), "err"); }
+}
+
 /* ---------- Export / import ---------- */
 function download(name, text, type) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -1476,6 +1575,8 @@ $("skDoc").addEventListener("change", () => { $("snapBox").hidden = $("skDoc").v
 $("btnCam").addEventListener("click", () => setViewCamera(false));
 $("btnCamTop").addEventListener("click", () => setViewCamera(true));
 $("btnSnap").addEventListener("click", captureView);
+$("btnSessSave").addEventListener("click", saveSession);
+$("fileSess").addEventListener("change", (e) => { const f = e.target.files[0]; if (f) loadSession(f); e.target.value = ""; });
 $("btnTcRestore").addEventListener("click", async () => {
   if (!S.markupBackup) { $("btnTcRestore").hidden = true; return; }
   try { await restoreTrimbleMarkups(S.markupBackup); $("btnTcRestore").hidden = true; snapStatus("Metingen van Trimble teruggezet.", "ok"); }
