@@ -206,7 +206,7 @@
     return { min: mn, max: mx };
   }
 
-  const IfcGeom = { CFG, guidToHex, buildIndex, expandIds, getTriangles, cornerPoints, outerCorners, aabb };
+  const IfcGeom = { CFG, guidToHex, buildIndex, expandIds, getTriangles, cornerPoints, outerCorners, hull2d, simplify, aabb };
   if (typeof module !== "undefined" && module.exports) module.exports = IfcGeom;
   else root.IfcGeom = IfcGeom;
 })(typeof window !== "undefined" ? window : globalThis);
