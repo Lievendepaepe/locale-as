@@ -68,6 +68,8 @@
   .dialog{border:2px solid var(--steel);border-radius:6px;padding:12px;margin:8px 0;background:#fff}
   .dialog h3{font-size:15px;font-weight:600;margin:0 0 6px;color:var(--steel)}
   .selcount{font-size:14px;font-weight:500;margin:8px 0;padding:8px;background:var(--panel);border-radius:4px}
+  #skPreview svg{width:100%;height:auto;display:block;border:1px solid var(--line);background:#fff}
+  .sym{display:inline-block;vertical-align:-2px;margin-right:2px}
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -212,6 +214,35 @@
       </div>
       <div id="cornerList"></div>
     </div>
+  </section>
+
+  <section id="sec5">
+    <h2><span class="n">5</span>Schets op schaal</h2>
+    <p class="muted">Bovenaanzicht in het lokale XY-vlak met de platen uit stap 4 en de punten uit stap 3 en 4.</p>
+    <div class="row">
+      <label>Papier <select id="skPaper"><option value="A4">A4 liggend</option><option value="A3">A3 liggend</option></select></label>
+      <label>Schaal <select id="skScale">
+        <option value="auto">Automatisch</option><option value="10">1:10</option><option value="20">1:20</option>
+        <option value="50">1:50</option><option value="100">1:100</option><option value="200">1:200</option>
+        <option value="500">1:500</option><option value="1000">1:1000</option></select></label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="skP4" checked> <svg class="sym" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="3.5" fill="#2F5D7C"></circle></svg>Hoekpunten (stap 4)</label>
+      <label><input type="checkbox" id="skP3" checked> <svg class="sym" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5 9.5 9.5 M9.5 2.5 2.5 9.5" stroke="#B45309" stroke-width="1.6" fill="none"></path></svg>Meetpunten (stap 3)</label>
+      <label><input type="checkbox" id="skDims" checked> Totaalmaten</label>
+    </div>
+    <div class="row">
+      <input type="text" id="skProject" placeholder="Project" style="flex:1">
+      <input type="text" id="skPart" placeholder="Onderdeel, bv. SEG-12" style="flex:1">
+    </div>
+    <div class="row">
+      <button class="primary" id="btnSketch">Schets maken</button>
+      <button id="btnSkPrint" disabled>Afdrukken / PDF</button>
+      <button id="btnSkSvg" disabled>SVG downloaden</button>
+    </div>
+    <div class="err-box" id="skErr"></div>
+    <p class="meta" id="skInfo"></p>
+    <div id="skPreview"></div>
   </section>
 </main>
 
@@ -787,7 +818,15 @@ async function placeCorners() {
         .filter((q) => { const k = q.g.map((v) => Math.round(v / 0.5)).join(","); if (seen.has(k)) return false; seen.add(k); return true; })
         .sort((a, b) => a.l[0] - b.l[0] || a.l[1] - b.l[1] || a.l[2] - b.l[2]);
       total += pts.length;
-      return { name: inf.tag || inf.name || `#${o.eid}`, tag: inf.tag, objName: inf.name, type: inf.type, pts };
+      // Omtrek van de plaat in het lokale XY-vlak (voor de schets van stap 5)
+      const vseen = new Set(), vpts = [];
+      for (const t of o.tris) for (const p of t) {
+        const k = p.map((v) => Math.round(v)).join(","); if (vseen.has(k)) continue; vseen.add(k);
+        const g = LCS.add(p, cal.off), l = LCS.toLocal(S.axis, g);
+        vpts.push({ u: l[0], v: l[1], p: g });
+      }
+      const outlineG = IfcGeom.simplify(IfcGeom.hull2d(vpts), 1, 1).map((q) => q.p);
+      return { name: inf.tag || inf.name || `#${o.eid}`, tag: inf.tag, objName: inf.name, type: inf.type, pts, outlineG };
     });
 
     $("selDialog").hidden = true;
@@ -833,6 +872,212 @@ function exportCornerCsv() {
   const lines = [];
   S.corners.forEach((c) => c.pts.forEach((q, i) => lines.push([S.axis.name, c.tag || "", c.objName || "", c.type || "", i + 1, ...q.l.map(n), ...q.g.map(n)].join(";"))));
   download(`hoekpunten_${S.axis.name.replace(/[^\w.-]+/g, "_")}.csv`, "\uFEFF" + [head.join(";"), ...lines].join("\r\n"), "text/csv");
+}
+
+/* ---------- Stap 5: schets op schaal ---------- */
+const PAPER = { A4: [297, 210], A3: [420, 297] };
+const SCALES = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000];
+const SK = { M: 10, TB_W: 97, TB_H: 36, ROW: 5, FONT: "Arial, Helvetica, sans-serif" };
+const SK_COL = { ink: "#1C2630", muted: "#5B6875", plate: "#EEF2F5", p4: "#2F5D7C", p3: "#B45309", x: "#D0342C", y: "#2E8B3A" };
+S.sketch = null;
+
+function skError(msg) { const el = $("skErr"); el.textContent = msg || ""; el.style.display = msg ? "block" : "none"; }
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const mm0 = (v) => Math.round(v).toString();
+const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
+function sketchInput() {
+  const plates = S.corners.map((c) => ({ name: c.name, outline: (c.outlineG || []).map((g) => LCS.toLocal(S.axis, g)) }));
+  let nr = 0;
+  const p4 = $("skP4").checked ? [].concat(...S.corners.map((c) => c.pts.map((q) => ({ nr: ++nr, plate: c.name, l: q.l })))) : [];
+  const p3 = $("skP3").checked ? pointRows().slice().reverse().map((r, i) => ({ code: "M" + (i + 1), name: pointName(r), l: r.l, ev: pointEval(r) })) : [];
+  return { plates, p4, p3 };
+}
+
+function buildSketch() {
+  const paper = $("skPaper").value, [W, H] = PAPER[paper], M = SK.M;
+  const { plates, p4, p3 } = sketchInput();
+  if (!plates.length && !p4.length && !p3.length) throw new Error("Geen gegevens: voer eerst stap 4 uit of plaats punten in stap 3.");
+
+  // Omvang in lokale XY (oorsprong altijd mee, zodat de assen zichtbaar zijn)
+  const xy = [[0, 0]];
+  plates.forEach((p) => p.outline.forEach((l) => xy.push([l[0], l[1]])));
+  p4.forEach((q) => xy.push([q.l[0], q.l[1]])); p3.forEach((q) => xy.push([q.l[0], q.l[1]]));
+  const minX = Math.min(...xy.map((a) => a[0])), maxX = Math.max(...xy.map((a) => a[0]));
+  const minY = Math.min(...xy.map((a) => a[1])), maxY = Math.max(...xy.map((a) => a[1]));
+  const extX = Math.max(maxX - minX, 1), extY = Math.max(maxY - minY, 1);
+
+  // Indeling: kop + titelhoek boven, tekening midden, tabellen onder
+  const band = paper === "A4" ? 62 : 95;
+  const box = { x0: M + 24, x1: W - M - 14, y0: 54, y1: H - M - band - 16 };
+  const bw = box.x1 - box.x0, bh = box.y1 - box.y0;
+  const need = Math.max(extX / bw, extY / bh);
+  const choice = $("skScale").value;
+  const s = choice === "auto" ? (SCALES.find((v) => v >= need) || Math.ceil(need)) : Number(choice);
+  const warn = s < need ? `Schaal 1:${s} is te groot voor ${paper}: de tekening loopt buiten het kader. Kies 1:${SCALES.find((v) => v >= need) || Math.ceil(need)} of A3.` : "";
+
+  const ox = box.x0 + (bw - extX / s) / 2, oy = box.y1 - (bh - extY / s) / 2;
+  const PX = (x) => ox + (x - minX) / s, PY = (y) => oy - (y - minY) / s;
+  const f = (v) => v.toFixed(2);
+
+  // Tabellen pagineren
+  const rows1 = Math.floor((band - 17) / SK.ROW), rowsN = Math.floor((H - M - 2 - 64) / SK.ROW);
+  const pages = (n) => (n <= rows1 ? 1 : 1 + Math.ceil((n - rows1) / rowsN));
+  const nSheets = Math.max(pages(p4.length), pages(p3.length));
+  const slice = (arr, k) => (k === 0 ? arr.slice(0, rows1) : arr.slice(rows1 + (k - 1) * rowsN, rows1 + k * rowsN));
+
+  const today = new Date().toLocaleDateString("nl-BE", { day: "2-digit", month: "2-digit", year: "numeric" });
+  const title = (k) => `
+    <rect x="${M}" y="${M}" width="${W - 2 * M}" height="${H - 2 * M}" fill="none" stroke="${SK_COL.ink}" stroke-width="0.5"/>
+    <text x="${M + 5}" y="${M + 10}" font-size="5" font-weight="bold" fill="${SK_COL.ink}">Schets lokale coördinaten${k ? " – tabellen" : ""}</text>
+    <text x="${M + 5}" y="${M + 16}" font-size="2.8" fill="${SK_COL.muted}">As ${esc(S.axis.name)} · bovenaanzicht, projectie op lokaal XY-vlak · maten in mm</text>
+    <circle cx="${M + 7}" cy="${M + 23}" r="0.9" fill="${SK_COL.p4}"/>
+    <text x="${M + 10}" y="${M + 24}" font-size="2.8" fill="${SK_COL.ink}">Hoekpunt automatisch (stap 4)</text>
+    <path d="M${M + 5.8} ${M + 27.8} L${M + 8.2} ${M + 30.2} M${M + 8.2} ${M + 27.8} L${M + 5.8} ${M + 30.2}" stroke="${SK_COL.p3}" stroke-width="0.4" fill="none"/>
+    <text x="${M + 10}" y="${M + 30}" font-size="2.8" fill="${SK_COL.ink}">Meetpunt manueel (stap 3)</text>
+    ${titleBlock(W, k)}`;
+  const titleBlock = (W, k) => {
+    const x = W - M - SK.TB_W, y = M, rows = [
+      ["Project", $("skProject").value || "–"], ["Onderdeel", $("skPart").value || "–"], ["Lokale as", S.axis.name],
+      ["Schaal", `1:${s} op ${paper} liggend`], ["Bron", S.ifc ? S.ifc.name : "Trimble Connect"], ["Datum · blad", `${today} · ${k + 1}/${nSheets}`]];
+    return `<rect x="${x}" y="${y}" width="${SK.TB_W}" height="${SK.TB_H}" fill="none" stroke="${SK_COL.ink}" stroke-width="0.3"/>
+      <line x1="${x + 22}" y1="${y}" x2="${x + 22}" y2="${y + SK.TB_H}" stroke="${SK_COL.ink}" stroke-width="0.3"/>` +
+      rows.map(([a, b], i) => `${i ? `<line x1="${x}" y1="${y + i * 6}" x2="${x + SK.TB_W}" y2="${y + i * 6}" stroke="${SK_COL.ink}" stroke-width="0.3"/>` : ""}
+      <text x="${x + 1.5}" y="${y + i * 6 + 4.2}" font-size="2.4" fill="${SK_COL.muted}">${a}</text>
+      <text x="${x + 24}" y="${y + i * 6 + 4.2}" font-size="2.6" fill="${SK_COL.ink}">${esc(cut(String(b), 40))}</text>`).join("");
+  };
+
+  const table4 = (x, y, rows) => {
+    if (!rows.length) return "";
+    const head = `<text x="${x}" y="${y - 2}" font-size="2.8" font-weight="bold" fill="${SK_COL.p4}">Hoekpunten – automatisch (stap 4)</text>
+      <rect x="${x}" y="${y}" width="96" height="${6 + rows.length * SK.ROW + 1}" fill="none" stroke="${SK_COL.ink}" stroke-width="0.3"/>
+      <line x1="${x}" y1="${y + 6}" x2="${x + 96}" y2="${y + 6}" stroke="${SK_COL.ink}" stroke-width="0.3"/>
+      <g font-size="2.5" font-weight="bold" fill="${SK_COL.ink}"><text x="${x + 2}" y="${y + 4.3}">Nr</text><text x="${x + 11}" y="${y + 4.3}">Plaat</text>
+      <text x="${x + 58}" y="${y + 4.3}" text-anchor="end">X</text><text x="${x + 76}" y="${y + 4.3}" text-anchor="end">Y</text><text x="${x + 93}" y="${y + 4.3}" text-anchor="end">Z</text></g>`;
+    return head + `<g font-size="2.5" fill="${SK_COL.ink}">` + rows.map((q, i) => {
+      const yy = y + 6 + (i + 1) * SK.ROW - 1.2;
+      return `<text x="${x + 2}" y="${yy}">${q.nr}</text><text x="${x + 11}" y="${yy}">${esc(cut(q.plate, 16))}</text>
+        <text x="${x + 58}" y="${yy}" text-anchor="end">${f0(q.l[0])}</text><text x="${x + 76}" y="${yy}" text-anchor="end">${f0(q.l[1])}</text><text x="${x + 93}" y="${yy}" text-anchor="end">${f0(q.l[2])}</text>`;
+    }).join("") + "</g>";
+  };
+  const table3 = (x, y, rows) => {
+    if (!rows.length) return "";
+    const tol = f0(parseFloat($("tol").value) || 0);
+    const cols = [["Code", 2, "start"], ["Naam", 12, "start"], ["X", 66, "end"], ["Y", 84, "end"], ["Z", 98, "end"], ["ΔX", 113, "end"], ["ΔY", 128, "end"], ["ΔZ", 143, "end"], ["Res.", 146, "start"]];
+    const head = `<text x="${x}" y="${y - 2}" font-size="2.8" font-weight="bold" fill="${SK_COL.p3}">Meetpunten – manueel (stap 3), tolerantie ± ${tol} mm</text>
+      <rect x="${x}" y="${y}" width="157" height="${6 + rows.length * SK.ROW + 1}" fill="none" stroke="${SK_COL.ink}" stroke-width="0.3"/>
+      <line x1="${x}" y1="${y + 6}" x2="${x + 157}" y2="${y + 6}" stroke="${SK_COL.ink}" stroke-width="0.3"/>
+      <g font-size="2.5" font-weight="bold" fill="${SK_COL.ink}">${cols.map(([t, dx, a]) => `<text x="${x + dx}" y="${y + 4.3}" text-anchor="${a}">${t}</text>`).join("")}</g>`;
+    const dv = (d) => (d == null ? "–" : `${d >= 0 ? "+" : ""}${f0(d)}`);
+    return head + `<g font-size="2.5" fill="${SK_COL.ink}">` + rows.map((q, i) => {
+      const yy = y + 6 + (i + 1) * SK.ROW - 1.2, e = q.ev;
+      const vals = [q.code, cut(q.name, 22), f0(q.l[0]), f0(q.l[1]), f0(q.l[2]), dv(e && e.devs[0]), dv(e && e.devs[1]), dv(e && e.devs[2]), e ? (e.ok ? "OK" : "NOK") : "–"];
+      return cols.map(([, dx, a], j) => `<text x="${x + dx}" y="${yy}" text-anchor="${a}"${j === 8 && e && !e.ok ? ' font-weight="bold"' : ""}>${esc(vals[j])}</text>`).join("");
+    }).join("") + "</g>";
+  };
+
+  // Blad 1: tekening
+  let d = "";
+  plates.forEach((p) => {
+    if (p.outline.length < 3) return;
+    d += `<polygon points="${p.outline.map((l) => `${f(PX(l[0]))},${f(PY(l[1]))}`).join(" ")}" fill="${SK_COL.plate}" stroke="${SK_COL.ink}" stroke-width="0.3"/>`;
+    const cx = p.outline.reduce((a, l) => a + l[0], 0) / p.outline.length, cy = p.outline.reduce((a, l) => a + l[1], 0) / p.outline.length;
+    const wPaper = (Math.max(...p.outline.map((l) => l[0])) - Math.min(...p.outline.map((l) => l[0]))) / s;
+    if (wPaper > p.name.length * 1.6 + 2) d += `<text x="${f(PX(cx))}" y="${f(PY(cy) + 0.9)}" font-size="2.6" text-anchor="middle" fill="${SK_COL.p4}">${esc(p.name)}</text>`;
+  });
+  // Lokale assen in O
+  const O = [PX(0), PY(0)];
+  d += `<line x1="${f(O[0])}" y1="${f(O[1])}" x2="${f(O[0] + 12)}" y2="${f(O[1])}" stroke="${SK_COL.x}" stroke-width="0.6"/>
+    <polygon points="${f(O[0] + 14)},${f(O[1])} ${f(O[0] + 11.5)},${f(O[1] - 1)} ${f(O[0] + 11.5)},${f(O[1] + 1)}" fill="${SK_COL.x}"/>
+    <text x="${f(O[0] + 15)}" y="${f(O[1] + 1)}" font-size="2.8" font-weight="bold" fill="${SK_COL.x}">X</text>
+    <line x1="${f(O[0])}" y1="${f(O[1])}" x2="${f(O[0])}" y2="${f(O[1] - 12)}" stroke="${SK_COL.y}" stroke-width="0.6"/>
+    <polygon points="${f(O[0])},${f(O[1] - 14)} ${f(O[0] - 1)},${f(O[1] - 11.5)} ${f(O[0] + 1)},${f(O[1] - 11.5)}" fill="${SK_COL.y}"/>
+    <text x="${f(O[0] - 1)}" y="${f(O[1] - 15)}" font-size="2.8" font-weight="bold" fill="${SK_COL.y}">Y</text>`;
+  // Punten
+  // Punten die op papier (bijna) samenvallen krijgen één gezamenlijk label, bv. "3·17"
+  const clusters = [];
+  p4.forEach((q) => {
+    const x = PX(q.l[0]), y = PY(q.l[1]);
+    const c = clusters.find((k) => Math.hypot(k.x - x, k.y - y) < 1.5);
+    if (c) c.nrs.push(q.nr); else clusters.push({ x, y, nrs: [q.nr] });
+  });
+  clusters.forEach((c) => {
+    d += `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="0.9" fill="${SK_COL.p4}"/><text x="${f(c.x + 1.3)}" y="${f(c.y - 1.2)}" font-size="2.4" font-weight="bold" fill="${SK_COL.p4}">${c.nrs.join("·")}</text>`;
+  });
+  p3.forEach((q) => {
+    const x = PX(q.l[0]), y = PY(q.l[1]), a = 1.2;
+    d += `<path d="M${f(x - a)} ${f(y - a)} L${f(x + a)} ${f(y + a)} M${f(x + a)} ${f(y - a)} L${f(x - a)} ${f(y + a)}" stroke="${SK_COL.p3}" stroke-width="0.35" fill="none"/>
+      <text x="${f(x + 1.6)}" y="${f(y + 3)}" font-size="2.4" font-weight="bold" fill="${SK_COL.p3}">${esc(q.code)}</text>`;
+  });
+  // Totaalmaten
+  if ($("skDims").checked) {
+    const xa = PX(minX), xb = PX(maxX), ya = PY(minY), yb = PY(maxY), yl = ya + 9, xl = xa - 9;
+    d += `<g stroke="${SK_COL.ink}" stroke-width="0.2" fill="none">
+      <line x1="${f(xa)}" y1="${f(ya + 2)}" x2="${f(xa)}" y2="${f(yl + 1.5)}"/><line x1="${f(xb)}" y1="${f(ya + 2)}" x2="${f(xb)}" y2="${f(yl + 1.5)}"/>
+      <line x1="${f(xa)}" y1="${f(yl)}" x2="${f(xb)}" y2="${f(yl)}"/>
+      <line x1="${f(xa - 1)}" y1="${f(yl + 1)}" x2="${f(xa + 1)}" y2="${f(yl - 1)}"/><line x1="${f(xb - 1)}" y1="${f(yl + 1)}" x2="${f(xb + 1)}" y2="${f(yl - 1)}"/>
+      <line x1="${f(xa - 2)}" y1="${f(ya)}" x2="${f(xl - 1.5)}" y2="${f(ya)}"/><line x1="${f(xa - 2)}" y1="${f(yb)}" x2="${f(xl - 1.5)}" y2="${f(yb)}"/>
+      <line x1="${f(xl)}" y1="${f(ya)}" x2="${f(xl)}" y2="${f(yb)}"/>
+      <line x1="${f(xl - 1)}" y1="${f(ya + 1)}" x2="${f(xl + 1)}" y2="${f(ya - 1)}"/><line x1="${f(xl - 1)}" y1="${f(yb + 1)}" x2="${f(xl + 1)}" y2="${f(yb - 1)}"/></g>
+      <text x="${f((xa + xb) / 2)}" y="${f(yl - 1)}" font-size="2.6" text-anchor="middle" fill="${SK_COL.ink}">${mm0(extX)}</text>
+      <text x="${f(xl - 1)}" y="${f((ya + yb) / 2)}" font-size="2.6" text-anchor="middle" fill="${SK_COL.ink}" transform="rotate(-90 ${f(xl - 1)} ${f((ya + yb) / 2)})">${mm0(extY)}</text>`;
+  }
+  // Schaalstok
+  const bars = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
+  const L = bars.find((v) => v / s >= 25) || bars[bars.length - 1], seg = L / s / 5;
+  const sbx = W - M - 14 - L / s, sby = box.y1 + 11;
+  let sb = "";
+  for (let i = 0; i < 5; i++) sb += `<rect x="${f(sbx + i * seg)}" y="${f(sby)}" width="${f(seg)}" height="1.2" fill="${i % 2 ? "#FFFFFF" : SK_COL.ink}" stroke="${SK_COL.ink}" stroke-width="0.2"/>`;
+  const lab = (v) => (L >= 1000 ? `${(v / 1000).toLocaleString("nl-BE")}` : `${v}`);
+  sb += `<text x="${f(sbx)}" y="${f(sby - 1)}" font-size="2.3" text-anchor="middle" fill="${SK_COL.ink}">0</text>
+    <text x="${f(sbx + L / s)}" y="${f(sby - 1)}" font-size="2.3" text-anchor="middle" fill="${SK_COL.ink}">${lab(L)} ${L >= 1000 ? "m" : "mm"}</text>
+    <text x="${f(sbx)}" y="${f(sby + 4.5)}" font-size="2.4" fill="${SK_COL.ink}">Schaal 1:${s} bij afdruk op 100 %</text>`;
+
+  // Bladen samenstellen
+  const sheets = [];
+  for (let k = 0; k < nSheets; k++) {
+    let body = title(k);
+    if (k === 0) {
+      body += d + sb;
+      const ty = H - M - band + 8;
+      body += table4(M + 5, ty, slice(p4, 0)) + table3(M + 110, ty, slice(p3, 0));
+      if (nSheets > 1) body += `<text x="${W - M - 3}" y="${H - M - 2}" font-size="2.4" text-anchor="end" fill="${SK_COL.muted}">Vervolg tabellen op blad 2</text>`;
+    } else {
+      body += table4(M + 5, 58, slice(p4, k)) + table3(M + 110, 58, slice(p3, k));
+    }
+    sheets.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}" font-family="${SK.FONT}"><rect width="${W}" height="${H}" fill="#FFFFFF"/>${body}</svg>`);
+  }
+  return { sheets, paper, W, H, s, warn, n4: p4.length, n3: p3.length, np: plates.length };
+}
+
+function makeSketch() {
+  skError("");
+  if (!S.axis) { skError("Leg eerst een lokale as vast (stap 1)."); return; }
+  try {
+    S.sketch = buildSketch();
+    const k = S.sketch;
+    $("skPreview").innerHTML = k.sheets[0];
+    $("skInfo").textContent = `Schaal 1:${k.s} op ${k.paper} liggend · ${k.np} plaat/platen · ${k.n4} hoekpunten · ${k.n3} meetpunten · ${k.sheets.length} blad(en).`;
+    if (k.warn) skError(k.warn);
+    $("btnSkPrint").disabled = $("btnSkSvg").disabled = false;
+  } catch (e) { skError(errMsg(e)); }
+}
+
+function printSketch() {
+  const k = S.sketch; if (!k) return;
+  const html = `<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>Schets ${esc(S.axis.name)}</title>
+<style>@page{size:${k.paper} landscape;margin:0}html,body{margin:0}.sheet{width:${k.W}mm;height:${k.H}mm;overflow:hidden;page-break-after:always;break-after:page}.sheet svg{display:block}</style></head>
+<body>${k.sheets.map((sv) => `<div class="sheet">${sv}</div>`).join("")}<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script></body></html>`;
+  let w = null;
+  try { w = window.open("", "_blank"); } catch (e) { w = null; }
+  if (w) { w.document.open(); w.document.write(html); w.document.close(); }
+  else download(`schets_${S.axis.name.replace(/[^\w.-]+/g, "_")}.html`, html, "text/html");
+}
+
+function downloadSketchSvg() {
+  const k = S.sketch; if (!k) return;
+  k.sheets.forEach((sv, i) => setTimeout(() =>
+    download(`schets_${S.axis.name.replace(/[^\w.-]+/g, "_")}_blad${i + 1}.svg`, '<?xml version="1.0" encoding="UTF-8"?>\n' + sv, "image/svg+xml"), i * 400));
 }
 
 /* ---------- Export / import ---------- */
@@ -911,6 +1156,9 @@ $("btnDlgCancel").addEventListener("click", () => setPointMode("3"));
 $("btnNewSel").addEventListener("click", openSelDialog);
 $("btnCornersOff").addEventListener("click", async () => { await removeIds(S.cornerLabelIds); S.cornerLabelIds = []; });
 $("btnCornersCsv").addEventListener("click", exportCornerCsv);
+$("btnSketch").addEventListener("click", makeSketch);
+$("btnSkPrint").addEventListener("click", printSketch);
+$("btnSkSvg").addEventListener("click", downloadSketchSvg);
 $("btnMeasLabelsOff").addEventListener("click", async () => { await removeIds(S.measLabelIds); S.measLabelIds = []; });
 $("axisName").addEventListener("change", () => { if (S.axis) { S.axis.name = $("axisName").value.trim() || S.axis.name; renderAxis(); } });
 
